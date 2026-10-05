@@ -249,6 +249,18 @@ llama_context::llama_context(
 
     cparams.n_ubatch = std::min(cparams.n_batch, params.n_ubatch == 0 ? params.n_batch : params.n_ubatch);
 
+    // a reranker that pools a document marker as well as the last token needs every pair whole in one
+    // ubatch: a unified cache splits a batch in order (an equal split cuts sequences to the same length),
+    // and a batch no larger than a ubatch is not split at all
+    const bool rerank_whole_pairs = cparams.embeddings && cparams.pooling_type == LLAMA_POOLING_TYPE_RANK &&
+                                    model.hparams.rerank_doc_token >= 0;
+    if (rerank_whole_pairs) {
+        if (!params.kv_unified || cparams.n_batch != cparams.n_ubatch) {
+            LLAMA_LOG_INFO("%s: reranker reads a document token: using a unified KV cache and n_batch = n_ubatch = %u\n", __func__, cparams.n_ubatch);
+        }
+        cparams.n_batch = cparams.n_ubatch;
+    }
+
     cparams.n_outputs_max = params.n_outputs_max == 0 || llama_model_has_encoder(&model) ? cparams.n_batch : params.n_outputs_max;
     cparams.n_outputs_max_per_seq = params.n_outputs_max_per_seq == 0 ?
             cparams.n_outputs_max : std::min(params.n_outputs_max_per_seq, cparams.n_outputs_max);
@@ -273,7 +285,7 @@ llama_context::llama_context(
     }
 
     cparams.op_offload = params.op_offload;
-    cparams.kv_unified = params.kv_unified;
+    cparams.kv_unified = params.kv_unified || rerank_whole_pairs;
 
     // initialized later
     cparams.pipeline_parallel = false;

@@ -356,6 +356,32 @@ void llm_graph_input_cls::set_input(const llama_ubatch * ubatch) {
                 data[s] = target_row[s];
             }
         }
+
+        if (cls_doc) {
+            GGML_ASSERT(ggml_backend_buffer_is_host(cls_doc->buffer));
+            GGML_ASSERT(ubatch->token);
+
+            // the last occurrence of the marker, so a literal marker inside the document cannot win
+            std::vector<int> doc_row(n_seqs_unq, -1);
+            for (int i = 0; i < n_tokens; ++i) {
+                if (ubatch->token[i] != doc_token) {
+                    continue;
+                }
+                for (int s = 0; s < ubatch->n_seq_id[i]; ++s) {
+                    doc_row[ubatch->seq_idx[ubatch->seq_id[i][s]]] = i;
+                }
+            }
+
+            uint32_t * data_doc = (uint32_t *) cls_doc->data;
+            for (int s = 0; s < n_seqs_unq; ++s) {
+                if (doc_row[s] < 0) {
+                    // a prompt without the rerank template (the warmup run, or a raw request): there is no
+                    // document, and the last token against itself scores 1.0
+                    LLAMA_LOG_DEBUG("%s: no document token %d in the sequence\n", __func__, doc_token);
+                }
+                data_doc[s] = doc_row[s] >= 0 ? doc_row[s] : data[s];
+            }
+        }
     }
 }
 
@@ -2606,7 +2632,7 @@ ggml_tensor * llm_graph_context::build_inp_mean() const {
     return cur;
 }
 
-ggml_tensor * llm_graph_context::build_inp_cls() const {
+ggml_tensor * llm_graph_context::build_inp_cls(ggml_tensor ** cls_doc) const {
     auto inp = std::make_unique<llm_graph_input_cls>(cparams, arch);
 
     auto & cur = inp->cls;
@@ -2614,6 +2640,14 @@ ggml_tensor * llm_graph_context::build_inp_cls() const {
     cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_seqs_unq);
     ggml_set_input(cur);
     ggml_set_name(cur, "cls");
+
+    if (cls_doc && hparams.rerank_doc_token >= 0) {
+        inp->doc_token = hparams.rerank_doc_token;
+        inp->cls_doc   = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, ubatch.n_seqs_unq);
+        ggml_set_input(inp->cls_doc);
+        ggml_set_name(inp->cls_doc, "cls_doc");
+        *cls_doc = inp->cls_doc;
+    }
 
     res->add_input(std::move(inp));
 
@@ -3841,7 +3875,26 @@ void llm_graph_context::build_pooling(
                 cur = ggml_get_rows(ctx0, inp, inp_cls);
             } break;
         case LLAMA_POOLING_TYPE_RANK:
-            {
+            if (hparams.rerank_doc_token >= 0) {
+                // "last but not late" interaction (jina-reranker-v3): the rerank template ends on the
+                // query marker, so the last token is the query and the document marker sits before it.
+                // both rows go through the same projector, the score is their cosine
+                ggml_tensor * inp_doc = nullptr;
+                ggml_tensor * inp_cls = build_inp_cls(&inp_doc);
+                GGML_ASSERT(inp_doc && cls && cls_out);
+
+                const int64_t n_seqs = inp_cls->ne[0];
+
+                cur = ggml_concat(ctx0, ggml_get_rows(ctx0, inp, inp_cls), ggml_get_rows(ctx0, inp, inp_doc), 1);
+                cur = ggml_mul_mat(ctx0, cls_out, ggml_relu(ctx0, ggml_mul_mat(ctx0, cls, cur)));
+                cur = ggml_l2_norm(ctx0, cur, 1e-12f);
+
+                ggml_tensor * q = ggml_view_2d(ctx0, cur, cur->ne[0], n_seqs, cur->nb[1], 0);
+                ggml_tensor * d = ggml_view_2d(ctx0, cur, cur->ne[0], n_seqs, cur->nb[1], n_seqs*cur->nb[1]);
+
+                cur = ggml_sum_rows(ctx0, ggml_mul(ctx0, q, d)); // [1, n_seqs]
+                break;
+            } else {
                 if (hparams.pooling_type_cls == LLAMA_POOLING_TYPE_MEAN) {
                     // modern bert with classifier_pooling = "mean" builds mean first then applies prediction head and classifier
                     // https://github.com/huggingface/transformers/blob/main/src/transformers/models/modernbert/modular_modernbert.py#L1404-1411

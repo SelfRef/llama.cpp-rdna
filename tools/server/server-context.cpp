@@ -54,6 +54,18 @@ static common_speculative_output_limits server_output_limits(const common_params
 }
 
 // a checkpoint restore dropped tokens the target had accepted - re-accept them rather than verify again
+// true for rerankers whose pooling reads a document marker as well as the last token, so the whole
+// pair has to be in one ubatch
+static bool server_rerank_reads_doc_token(const llama_model * model) {
+    char arch[64];
+    char val[32];
+    if (llama_model_meta_val_str(model, "general.architecture", arch, sizeof(arch)) < 0) {
+        return false;
+    }
+    const std::string key = std::string(arch) + ".rerank.doc_token_id";
+    return llama_model_meta_val_str(model, key.c_str(), val, sizeof(val)) >= 0;
+}
+
 static std::vector<llama_token> server_accept_replay(
         common_sampler * smpl,
         llama_context * ctx,
@@ -459,9 +471,10 @@ struct server_slot {
         if (pooling == LLAMA_POOLING_TYPE_LAST) {
             return true;
         }
-        // causal rerankers read the last token and have a KV cache, so they can also be chunked/split.
+        // causal rerankers read the last token and have a KV cache, so they can also be chunked/split -
+        // unless the score also reads a document marker earlier in the prompt (jina-reranker-v3)
         if (pooling == LLAMA_POOLING_TYPE_RANK && llama_get_causal_attn(ctx_tgt)) {
-            return true;
+            return !server_rerank_reads_doc_token(llama_get_model(ctx_tgt));
         }
         // a decision task reads its outputs from the last batch
         if (task->type == SERVER_TASK_TYPE_DECISION) {

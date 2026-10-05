@@ -238,6 +238,10 @@ struct llama_hparams {
     // for Classifiers
     uint32_t n_cls_out = 1;
 
+    // rerankers that score by projecting two hidden states (jina-reranker-v3): the document's at
+    // this token and the query's at the last one, compared by cosine. -1 = not such a model
+    int32_t rerank_doc_token = -1;
+
     // input embedding dimension (0 = use n_embd)
     uint32_t n_embd_inp_impl = 0;
 

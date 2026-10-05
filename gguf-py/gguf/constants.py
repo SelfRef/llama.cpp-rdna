@@ -317,6 +317,9 @@ class Keys:
         OUTPUT_LABELS = "{arch}.classifier.output_labels"
         POOLING_TYPE  = "{arch}.classifier.pooling_type"
 
+    class Rerank:
+        DOC_TOKEN_ID = "{arch}.rerank.doc_token_id"
+
     class ShortConv:
         L_CACHE = "{arch}.shortconv.l_cache"
 

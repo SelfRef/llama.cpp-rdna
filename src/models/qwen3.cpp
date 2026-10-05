@@ -25,9 +25,14 @@ void llama_model_qwen3::load_arch_hparams(llama_model_loader & ml) {
     } else {
         hparams.swa_type = LLAMA_SWA_TYPE_NONE;
     }
+
+    uint32_t doc_token = 0;
+    if (ml.get_key(LLM_KV_RERANK_DOC_TOKEN_ID, doc_token, false)) {
+        hparams.rerank_doc_token = (int32_t) doc_token;
+    }
 }
 
-void llama_model_qwen3::load_arch_tensors(llama_model_loader &) {
+void llama_model_qwen3::load_arch_tensors(llama_model_loader & ml) {
     LLAMA_LOAD_LOCALS;
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
@@ -40,8 +45,20 @@ void llama_model_qwen3::load_arch_tensors(llama_model_loader &) {
         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
     }
 
-    // output rerank head
-    cls_out = create_tensor(tn(LLM_TENSOR_CLS_OUT, "weight"), {n_embd, hparams.n_cls_out}, TENSOR_NOT_REQUIRED);
+    if (hparams.rerank_doc_token >= 0) {
+        // two-layer projector (Linear, ReLU, Linear, no biases) shared by the query and the document
+        const ggml_tensor * meta = ml.get_tensor_meta(tn(LLM_TENSOR_CLS_OUT, "weight").str().c_str());
+        if (meta == nullptr) {
+            throw std::runtime_error("rerank.doc_token_id is set but the model has no cls.output projector");
+        }
+        const int64_t n_proj_hidden = meta->ne[0];
+        const int64_t n_proj_out    = meta->ne[1];
+        cls     = create_tensor(tn(LLM_TENSOR_CLS,     "weight"), {n_embd,        n_proj_hidden}, 0);
+        cls_out = create_tensor(tn(LLM_TENSOR_CLS_OUT, "weight"), {n_proj_hidden, n_proj_out},    0);
+    } else {
+        // output rerank head
+        cls_out = create_tensor(tn(LLM_TENSOR_CLS_OUT, "weight"), {n_embd, hparams.n_cls_out}, TENSOR_NOT_REQUIRED);
+    }
 
     for (int i = 0; i < n_layer; ++i) {
         auto & layer = layers[i];

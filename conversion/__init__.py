@@ -140,6 +140,7 @@ TEXT_MODEL_MAP: dict[str, str] = {
     "JinaBertForMaskedLM": "bert",
     "JinaBertModel": "bert",
     "JinaEmbeddingsV5Model": "bert",
+    "JinaForRanking": "qwen",
     "KORMoForCausalLM": "qwen",
     "KimiK25ForConditionalGeneration": "deepseek",
     "KimiK3ForConditionalGeneration": "kimi_k3",

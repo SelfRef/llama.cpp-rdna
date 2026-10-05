@@ -262,6 +262,10 @@ public:
 
     ggml_tensor * cls; // I32 [n_batch]
 
+    // rerankers with a document marker: the row of that token per sequence
+    ggml_tensor * cls_doc   = nullptr; // I32 [n_batch]
+    llama_token   doc_token = -1;
+
     const llama_cparams cparams;
     const llm_arch arch;
 };
@@ -1179,7 +1183,7 @@ struct llm_graph_context {
     ggml_tensor * build_inp_attn_scale() const;
     ggml_tensor * build_inp_out_ids() const;
     ggml_tensor * build_inp_mean() const;
-    ggml_tensor * build_inp_cls() const;
+    ggml_tensor * build_inp_cls(ggml_tensor ** cls_doc = nullptr) const;
 
     ggml_tensor * build_inp_cross_embd() const;
     ggml_tensor * build_inp_pos_bucket_enc() const;

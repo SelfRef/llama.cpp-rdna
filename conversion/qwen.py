@@ -268,6 +268,58 @@ class Qwen3Model(Qwen2Model):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("JinaForRanking")
+@ModelBase.example("jinaai/jina-reranker-v3.5")
+class JinaRerankerV3Model(Qwen3Model):
+    model_arch = gguf.MODEL_ARCH.QWEN3
+
+    # jina-reranker-v3/v3.5: "last but not late" interaction on a Qwen3 backbone. The hidden state at
+    # <|embed_token|> after each document and at <|rerank_token|> after the query go through one
+    # projector (Linear, ReLU, Linear) and are compared by cosine. The model is trained listwise, with
+    # every document in one prompt; the rerank template below is the one-document case of that prompt,
+    # cut after the query marker - the model is causal, so nothing after it changes either state.
+    SYSTEM_PROMPT = (
+        "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "
+        "If the query is a question, how relevant a passage is depends on how well it answers the question. "
+        "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "
+        "If an instruction is provided, you should follow the instruction when determining the ranking."
+    )
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
+        doc_token_id = tokenizer.convert_tokens_to_ids("<|embed_token|>")  # ty: ignore[unresolved-attribute]
+        assert isinstance(doc_token_id, int) and doc_token_id != tokenizer.unk_token_id  # ty: ignore[unresolved-attribute]
+
+        self.gguf_writer.add_pooling_type(gguf.PoolingType.RANK)
+        self.gguf_writer.add_rerank_doc_token_id(doc_token_id)
+        self.gguf_writer.add_chat_template([{
+            "name": "rerank",
+            "template": f"<|im_start|>system\n{self.SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n"
+                        "I will provide you with 1 passages, each indicated by a numerical identifier. "
+                        "Rank the passages based on their relevance to query: {query}\n"
+                        '<passage id="0">\n{document}<|embed_token|>\n</passage>\n'
+                        "<query>\n{query}<|rerank_token|>",
+        }])
+
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        # the projector is the scoring head here, not a multimodal adapter for the text-model filter to drop
+        if item[0].startswith("projector."):
+            return item
+        return super().filter_tensors(item)
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name == "projector.0.weight":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.CLS] + ".weight", data_torch)
+            return
+        if name == "projector.2.weight":
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.CLS_OUT] + ".weight", data_torch)
+            return
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
 @ModelBase.register("Qwen3MoeForCausalLM")
 @ModelBase.example("Qwen/Qwen3-30B-A3B")
 class Qwen3MoeModel(Qwen2MoeModel):

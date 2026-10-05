@@ -1337,6 +1337,9 @@ class GGUFWriter:
     def add_classifier_output_labels(self, labels: Sequence[str]) -> None:
         self.add_array(Keys.Classifier.OUTPUT_LABELS.format(arch=self.arch), labels)
 
+    def add_rerank_doc_token_id(self, id: int) -> None:
+        self.add_uint32(Keys.Rerank.DOC_TOKEN_ID.format(arch=self.arch), id)
+
     def add_classifier_pooling_type(self, value: PoolingType) -> None:
         self.add_uint32(Keys.Classifier.POOLING_TYPE.format(arch=self.arch), value.value)
 
