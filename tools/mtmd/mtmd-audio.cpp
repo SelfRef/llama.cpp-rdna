@@ -557,6 +557,11 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
         return false;
     }
 
+    // chunked Qwen2.5-Omni encoder (clip.audio.n_window): only the real frames go in, as torch's
+    // feature_attention_mask does -- ceil(n_samples / hop), at most 3000 (30 s) per encoder pass
+    const int64_t n_real = hparams.audio_n_window > 0
+        ? (int64_t) ((n_samples + hparams.audio_hop_len - 1) / hparams.audio_hop_len) : 0;
+
     std::vector<float> smpl;
     // reflection padding needs one sample plus half an FFT window
     size_t min_samples = (size_t) hparams.audio_n_fft / 2 + 1;
@@ -597,6 +602,22 @@ bool mtmd_audio_preprocessor_whisper::preprocess(const float *                 s
         printf("output: n_mel = %d, n_len = %d\n", (int) out_full.n_mel, (int) out_full.n_len);
     }
     const size_t frames_per_chunk = 3000;
+    if (n_real > 0) {
+        const int64_t n_frames = std::min(n_real, out_full.n_len);
+        for (int64_t off = 0; off < n_frames; off += frames_per_chunk) {
+            mtmd_audio_mel out_chunk;
+            out_chunk.n_len     = std::min((int64_t) frames_per_chunk, n_frames - off);
+            out_chunk.n_mel     = out_full.n_mel;
+            out_chunk.n_len_org = out_chunk.n_len;
+            out_chunk.data.reserve((size_t) out_chunk.n_mel * (size_t) out_chunk.n_len);
+            for (int64_t i = 0; i < out_full.n_mel; i++) {
+                auto src = out_full.data.begin() + (size_t) i * out_full.n_len + off;
+                out_chunk.data.insert(out_chunk.data.end(), src, src + out_chunk.n_len);
+            }
+            output.push_back(std::move(out_chunk));
+        }
+        return true;
+    }
     GGML_ASSERT((size_t) out_full.n_len > frames_per_chunk);
     for (size_t off = 0; off < (size_t) out_full.n_len; off += frames_per_chunk) {
         int64_t n_len = std::min((int64_t)frames_per_chunk, out_full.n_len - (int64_t)off);

@@ -139,6 +139,10 @@ struct clip_hparams {
     int32_t audio_n_fft       = -1;
     int32_t audio_window_len  = -1;
     int32_t audio_hop_len     = -1;
+    // qwen2a: chunked self-attention window in encoder tokens (after conv2), from clip.audio.n_window.
+    // 0 = full attention over the whole 30 s window (Qwen2-Audio and the upstream Qwen2.5-Omni mmprojs);
+    // > 0 = torch's Qwen2_5OmniAudioEncoder chunking, variable-length input (jina-embeddings-v5-omni)
+    int32_t audio_n_window    = 0;
 
     // parakeet
     std::vector<float> mel_filters;

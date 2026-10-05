@@ -624,6 +624,15 @@ struct mtmd_context {
         }
     }
 
+    // true if the text vocab has `s` as one special token (no vocab = nothing to check against)
+    bool is_special_token(const std::string & s) const {
+        if (!vocab) {
+            return true;
+        }
+        llama_token tok[2];
+        return llama_tokenize(vocab, s.data(), (int) s.size(), tok, 2, /* add_special */ false, /* parse_special */ true) == 1;
+    }
+
     void init_vision() {
         GGML_ASSERT(ctx_v != nullptr);
         image_preproc.reset();
@@ -700,6 +709,14 @@ struct mtmd_context {
                     // <|vision_start|> ... (image embeddings) ... <|vision_end|>
                     img_beg = "<|vision_start|>";
                     img_end = "<|vision_end|>";
+                    // jina-embeddings-v5-omni-nano pairs this tower with a EuroBERT vocab that has no
+                    // Qwen wrappers; tokenized as text they become a string of BPE pieces around the image
+                    if (!is_special_token(img_beg) || !is_special_token(img_end)) {
+                        LOG_WRN("%s: '%s'/'%s' are not special tokens in the text vocab, image is not wrapped\n",
+                                __func__, img_beg.c_str(), img_end.c_str());
+                        img_beg.clear();
+                        img_end.clear();
+                    }
                     image_preproc = std::make_unique<mtmd_image_preprocessor_dyn_size>(ctx_v);
                 } break;
             case PROJECTOR_TYPE_MINIMAX_M3:
@@ -942,6 +959,11 @@ struct mtmd_context {
                     // <|audio_bos|> ... (embeddings) ... <|audio_eos|>
                     aud_beg = "<|audio_bos|>";
                     aud_end = "<|audio_eos|>";
+                    if (!is_special_token(aud_beg) && is_special_token("<|audio_start|>")) {
+                        // jina-embeddings-v5-omni: Qwen3 vocab, Qwen3-Omni style audio markers
+                        aud_beg = "<|audio_start|>";
+                        aud_end = "<|audio_end|>";
+                    }
                     audio_preproc = std::make_unique<mtmd_audio_preprocessor_whisper>(ctx_a);
                 } break;
             case PROJECTOR_TYPE_QWEN3A:

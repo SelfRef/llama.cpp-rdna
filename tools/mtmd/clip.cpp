@@ -1677,6 +1677,23 @@ struct clip_model_loader {
                         // ref: https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/blob/main/preprocessor_config.json
                         hparams.set_limit_image_tokens(8, 4096);
                         hparams.set_warmup_n_tokens(46*46); // avoid OOM on warmup
+                        // If the GGUF carries explicit min/max pixels (from preprocessor_config.json,
+                        // e.g. jina-embeddings-v5-omni), use those instead of the hardcoded defaults so
+                        // the resize matches torch's Qwen2VLImageProcessor. --image-min/max-tokens still win.
+                        {
+                            int min_pixels = 0, max_pixels = 0;
+                            get_u32(KEY_IMAGE_MIN_PIXELS, min_pixels, false);
+                            get_u32(KEY_IMAGE_MAX_PIXELS, max_pixels, false);
+                            if (min_pixels > 0 && max_pixels > 0) {
+                                if (hparams.custom_image_min_tokens <= 0) hparams.image_min_pixels = min_pixels;
+                                if (hparams.custom_image_max_tokens <= 0) hparams.image_max_pixels = max_pixels;
+                                // torch's Qwen2VLImageProcessor resizes straight to the smart_resize size;
+                                // PAD_CEIL's second scale can shrink one side by a pixel and leave a black
+                                // column (jina-ai/llama.cpp 67ceac22). Only for mmprojs that carry the torch
+                                // limits, so the stock Qwen-VL mmprojs keep their current preprocessing.
+                                hparams.image_resize_pad = PAD_NONE;
+                            }
+                        }
                         const int warn_min_pixels = 1024 * hparams.n_merge * hparams.n_merge * hparams.patch_size * hparams.patch_size;
                         if (hparams.image_min_pixels < warn_min_pixels) {
                             LOG_WRN("%s: Qwen-VL models require at minimum 1024 image tokens to function correctly on grounding tasks\n", __func__);
@@ -1814,6 +1831,9 @@ struct clip_model_loader {
                         hparams.audio_n_fft        = 400;
                         hparams.audio_window_len   = 400;
                         hparams.audio_hop_len      = 160;
+                        if (model.proj_type == PROJECTOR_TYPE_QWEN2A) {
+                            get_u32(KEY_A_N_WINDOW, hparams.audio_n_window, false);
+                        }
                     } break;
                 case PROJECTOR_TYPE_MIMO_AUDIO:
                     {
@@ -4292,6 +4312,14 @@ int clip_n_output_tokens(const clip_ctx * ctx, const clip_image_f32 * img) {
             {
                 n_patches = img->nx();
 
+                if (ctx->model.proj_type == PROJECTOR_TYPE_QWEN2A && ctx->model.hparams.audio_n_window > 0) {
+                    // chunked: the input is the real mel length, conv2 (stride 2, pad 1) then AvgPool1d(2, 2)
+                    // ref: _get_feat_extract_output_lengths in Qwen2_5OmniAudioEncoder
+                    const int after_cnn = (n_patches - 1) / 2 + 1;
+                    n_patches = (after_cnn - 2) / 2 + 1;
+                    break;
+                }
+
                 const int proj_stack_factor = ctx->model.hparams.proj_stack_factor;
                 if (ctx->model.audio_has_stack_frames()) {
                     GGML_ASSERT(proj_stack_factor > 0);
@@ -4638,6 +4666,18 @@ bool clip_encode(struct clip_ctx * ctx, struct clip_encode_params * params) {
         GGML_ASSERT((size_t)n_step * n_mel == buf.size());
 
         set_input_f32("inp_raw", buf);
+
+        if (ctx->model.proj_type == PROJECTOR_TYPE_QWEN2A && hparams.audio_n_window > 0) {
+            // block-diagonal attention: encoder token i sees only the tokens of its own n_window chunk
+            const int n_pos = (n_step - 1) / 2 + 1;
+            std::vector<float> mask((size_t) n_pos * n_pos);
+            for (int i = 0; i < n_pos; i++) {
+                for (int j = 0; j < n_pos; j++) {
+                    mask[(size_t) i * n_pos + j] = i / hparams.audio_n_window == j / hparams.audio_n_window ? 0.0f : -INFINITY;
+                }
+            }
+            set_input_f32("audio_chunk_mask", mask);
+        }
     }
 
     // set input per projector

@@ -81,6 +81,7 @@
 #define KEY_AUDIO_PROJ_TYPE        "clip.audio.projector_type" // for models with mixed modalities
 #define KEY_A_NUM_MEL_BINS         "clip.audio.num_mel_bins"
 #define KEY_A_PROJ_STACK_FACTOR    "clip.audio.projector.stack_factor"
+#define KEY_A_N_WINDOW             "clip.audio.n_window"
 #define KEY_A_CHUNK_SIZE           "clip.audio.chunk_size"
 #define KEY_A_CONV_KERNEL_SIZE     "clip.audio.conv_kernel_size"
 #define KEY_A_MAX_POS_EMB          "clip.audio.max_pos_emb"

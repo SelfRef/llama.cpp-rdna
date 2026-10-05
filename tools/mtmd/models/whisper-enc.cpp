@@ -2,13 +2,35 @@
 
 ggml_cgraph * clip_graph_whisper_enc::build() {
     const int n_frames = img.nx();
-    const int n_pos    = n_frames / 2;
-    GGML_ASSERT(model.position_embeddings->ne[1] >= n_pos);
+
+    // Qwen2_5OmniAudioEncoder with n_window from the mmproj (jina-embeddings-v5-omni): the variable-length
+    // mel is cut into n_window*2-frame chunks, each chunk gets its own conv stack (zero-padded at both of
+    // its ends) and its own positions 0..n_window-1, and attention stays inside the chunk. A shorter last
+    // chunk zero-padded by the convs gives the same valid outputs as torch's padded_mask path.
+    const int  n_window = proj_type == PROJECTOR_TYPE_QWEN2A ? hparams.audio_n_window : 0;
+    const bool chunked  = n_window > 0;
+    const int  n_pos    = chunked ? (n_frames - 1) / 2 + 1 : n_frames / 2;
+    GGML_ASSERT(model.position_embeddings->ne[1] >= (chunked ? n_window : n_pos));
 
     ggml_tensor * inp = build_inp_raw(1);
 
-    // conv1d block
-    {
+    if (chunked) {
+        const int chunk_len = n_window * 2;
+        ggml_tensor * out = nullptr;
+        for (int off = 0; off < n_frames; off += chunk_len) {
+            const int len = std::min(chunk_len, n_frames - off);
+            ggml_tensor * cur = ggml_cont(ctx0, ggml_view_3d(ctx0, inp, len, inp->ne[1], inp->ne[2],
+                                                             inp->nb[1], inp->nb[2], (size_t) off * inp->nb[0]));
+            cur = ggml_conv_1d_ph(ctx0, model.conv1d_1_w, cur, 1, 1);
+            cur = ggml_gelu_erf(ctx0, ggml_add(ctx0, cur, model.conv1d_1_b));
+            cur = ggml_conv_1d_ph(ctx0, model.conv1d_2_w, cur, 2, 1);
+            cur = ggml_gelu_erf(ctx0, ggml_add(ctx0, cur, model.conv1d_2_b));
+            out = out ? ggml_concat(ctx0, out, cur, 0) : cur;
+        }
+        GGML_ASSERT(out->ne[0] == n_pos);
+        inp = ggml_cont(ctx0, ggml_transpose(ctx0, out));
+        cb(inp, "after_conv1d", -1);
+    } else {
         // convolution + gelu
         ggml_tensor * cur = ggml_conv_1d_ph(ctx0, model.conv1d_1_w, inp, 1, 1);
         cur = ggml_add(ctx0, cur, model.conv1d_1_b);
@@ -33,15 +55,28 @@ ggml_cgraph * clip_graph_whisper_enc::build() {
 
     ggml_tensor * pos_embd_selected = ggml_view_2d(
         ctx0, model.position_embeddings,
-        model.position_embeddings->ne[0], n_pos,
+        model.position_embeddings->ne[0], chunked ? n_window : n_pos,
         model.position_embeddings->nb[1], 0
     );
+    build_vit_opts vit_opts;
+    if (chunked) {
+        // positions restart at 0 in every chunk
+        const int n_chunks = (n_pos + n_window - 1) / n_window;
+        pos_embd_selected = ggml_repeat_4d(ctx0, pos_embd_selected, pos_embd_selected->ne[0], (int64_t) n_chunks * n_window, 1, 1);
+        pos_embd_selected = ggml_view_2d(ctx0, pos_embd_selected, pos_embd_selected->ne[0], n_pos, pos_embd_selected->nb[1], 0);
+
+        ggml_tensor * chunk_mask = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_pos, n_pos);
+        ggml_set_name(chunk_mask, "audio_chunk_mask");
+        ggml_set_input(chunk_mask);
+        vit_opts.attn_mask = chunk_mask;
+    }
     ggml_tensor * cur = build_vit(
                             inp, n_pos,
                             NORM_TYPE_NORMAL,
                             hparams.ffn_op,
                             pos_embd_selected,
-                            nullptr);
+                            nullptr,
+                            vit_opts);
 
     cb(cur, "after_transformer", -1);
 
