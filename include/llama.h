@@ -43,10 +43,10 @@
 #define LLAMA_FILE_MAGIC_GGSQ 0x67677371u // 'ggsq'
 
 #define LLAMA_SESSION_MAGIC   LLAMA_FILE_MAGIC_GGSN
-#define LLAMA_SESSION_VERSION 10
+#define LLAMA_SESSION_VERSION 11
 
 #define LLAMA_STATE_SEQ_MAGIC   LLAMA_FILE_MAGIC_GGSQ
-#define LLAMA_STATE_SEQ_VERSION 3
+#define LLAMA_STATE_SEQ_VERSION 4
 
 #ifdef __cplusplus
 extern "C" {
@@ -351,17 +351,6 @@ extern "C" {
 
         enum llama_lazy_mode lazy_mode; // on-demand reading of tensors marked by the arch
 
-        // n-gram hash-embedding table kept on disk (see ple_on_disk below)
-        int32_t ple_io_threads; // parallel pread workers
-        int32_t ple_cache_mb;   // in-memory cache of recently read rows, 0 disables
-
-        // load the n-gram hash-embedding table (per_layer_token_embd) from a separate GGUF
-        // instead of the main model file, so different tables can be swapped without
-        // requantizing the rest of the model. NULL: read the table from the main file, as
-        // before. Implies ple_on_disk (the whole point is testing tables without paying
-        // their VRAM/RAM cost). qwen4exp only.
-        const char * path_ple;
-
         // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
         int32_t main_gpu;
 
@@ -386,9 +375,6 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
-        bool ple_on_disk;     // keep the n-gram hash-embedding table (per_layer_token_embd) on disk: never
-                              // mapped or loaded, the rows a batch needs are read from the file (qwen4exp)
-        bool ple_direct_io;   // read those rows with O_DIRECT, bypassing the page cache
     };
 
     struct llama_sampler_seq_config {
@@ -518,14 +504,14 @@ extern "C" {
     LLAMA_API struct llama_model_quantize_params llama_model_quantize_default_params(void);
 
     // Initialize the llama + ggml backend
-    // If numa is true, use NUMA optimizations
     // Call once at the start of the program
     LLAMA_API void llama_backend_init(void);
 
     // Call once at the end of the program - currently only used for MPI
     LLAMA_API void llama_backend_free(void);
 
-    //optional:
+    // Optional: enable numa optimizations
+    // TODO: deprecate and make part of llama_backend_init()
     LLAMA_API void llama_numa_init(enum ggml_numa_strategy numa);
 
     // Optional: an auto threadpool gets created in ggml if not passed explicitly
@@ -708,9 +694,6 @@ extern "C" {
 
     // Returns true if the model is diffusion-based (like LLaDA, Dream, etc.)
     LLAMA_API bool llama_model_is_diffusion(const struct llama_model * model);
-
-    // Returns true if the model uses causal attention
-    LLAMA_API bool llama_model_is_causal(const struct llama_model * model);
 
     // Returns 0 on success
     LLAMA_API uint32_t llama_model_quantize(

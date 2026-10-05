@@ -323,8 +323,11 @@ struct llama_file::impl {
         off_t offset_from_alignment = offset - aligned_offset;
         size_t bytes_to_read = (offset_from_alignment + size + alignment - 1) & ~(alignment - 1);
 
+        // stage through a bounded buffer, so that a large tensor is not held in memory twice while it loads
+        const size_t buffer_size = std::min<size_t>(bytes_to_read, LLAMA_DIRECT_IO_BUFFER_SIZE);
+
         void * raw_buffer = nullptr;
-        int ret = posix_memalign(&raw_buffer, alignment, bytes_to_read);
+        int ret = posix_memalign(&raw_buffer, alignment, buffer_size);
         if (ret != 0) {
             throw std::runtime_error(format("posix_memalign failed with error %d", ret));
         }
@@ -335,10 +338,20 @@ struct llama_file::impl {
         std::unique_ptr<void, aligned_buffer_deleter> buffer(raw_buffer);
 
         seek(aligned_offset, SEEK_SET);
-        read_raw_unsafe(buffer.get(), bytes_to_read);
 
-        uintptr_t actual_data = reinterpret_cast<uintptr_t>(buffer.get()) + offset_from_alignment;
-        memcpy(dest, reinterpret_cast<void *>(actual_data), size);
+        size_t skip   = offset_from_alignment;
+        size_t copied = 0;
+        for (size_t done = 0; done < bytes_to_read; ) {
+            const size_t n = std::min(buffer_size, bytes_to_read - done);
+            read_raw_unsafe(buffer.get(), n);
+
+            const size_t count = std::min(n - skip, size - copied);
+            memcpy(reinterpret_cast<char *>(dest) + copied, reinterpret_cast<char *>(buffer.get()) + skip, count);
+
+            copied += count;
+            skip    = 0;
+            done   += n;
+        }
     }
 
     void read_raw(void * ptr, size_t len) {
@@ -440,56 +453,6 @@ void llama_file::write_u32(uint32_t val) const { pimpl->write_u32(val); }
 // llama_mmap
 
 #if defined(_POSIX_MAPPED_FILES) || defined(_WIN32)
-static size_t llama_mmap_page_size() {
-#if defined(_WIN32)
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return (size_t) si.dwPageSize;
-#else
-    return (size_t) sysconf(_SC_PAGESIZE);
-#endif
-}
-
-// the pages the given rows fall on, merged into runs. rows are smaller than a page and
-// repeat within a batch, so this turns a hint per row into a hint per page.
-static llama_mmap::ranges llama_mmap_row_pages(
-        size_t base_off, size_t stride, size_t row_size, size_t map_size,
-        const int32_t * rows, size_t n_rows, size_t page_size) {
-    std::vector<size_t> pages;
-    pages.reserve(n_rows);
-
-    for (size_t i = 0; i < n_rows; ++i) {
-        if (rows[i] < 0) {
-            continue;
-        }
-        const size_t first = base_off + (size_t) rows[i] * stride;
-        const size_t last  = first + row_size;
-        // an unexpected index must not turn into a hint outside the mapping
-        if (row_size == 0 || last > map_size || last < first) {
-            continue;
-        }
-        for (size_t p = first / page_size; p <= (last - 1) / page_size; ++p) {
-            pages.push_back(p);
-        }
-    }
-
-    std::sort(pages.begin(), pages.end());
-    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
-
-    llama_mmap::ranges res;
-    for (size_t i = 0; i < pages.size(); ) {
-        size_t j = i + 1;
-        while (j < pages.size() && pages[j] == pages[j - 1] + 1) {
-            ++j;
-        }
-        const size_t off = pages[i] * page_size;
-        res.emplace_back(off, off + std::min((pages[j - 1] - pages[i] + 1) * page_size, map_size - off));
-        i = j;
-    }
-
-    return res;
-}
-
 // merge `ranges` and return their complement within [0, limit)
 static llama_mmap::ranges ranges_complement(llama_mmap::ranges ranges, size_t limit) {
     llama_mmap::ranges res;
@@ -722,60 +685,6 @@ void * llama_mmap::addr() const { return pimpl->addr; }
 
 void llama_mmap::unmap_fragment(size_t first, size_t last) { pimpl->unmap_fragment(first, last); }
 
-bool llama_mmap::contains(const void * ptr, size_t len) const {
-    const char * addr = (const char *) pimpl->addr;
-    const char * p    = (const char *) ptr;
-    return addr != nullptr && p >= addr && p + len <= addr + pimpl->size;
-}
-
-void llama_mmap::prefetch_rows(const void * base, size_t stride, size_t row_size,
-                               const int32_t * rows, size_t n_rows) const {
-#if defined(_POSIX_MAPPED_FILES) || defined(_WIN32)
-    const size_t base_off = (const char *) base - (const char *) pimpl->addr;
-    const auto ranges = llama_mmap_row_pages(base_off, stride, row_size, pimpl->size,
-                                             rows, n_rows, llama_mmap_page_size());
-#endif
-
-#if defined(_POSIX_MAPPED_FILES)
-    for (const auto & range : ranges) {
-        // unchecked: a failed hint only costs the fault it would have avoided
-        posix_madvise((char *) pimpl->addr + range.first, range.second - range.first,
-                      POSIX_MADV_WILLNEED);
-    }
-#elif defined(_WIN32)
-    #if _WIN32_WINNT >= 0x602
-    // PrefetchVirtualMemory takes all ranges in one call, which is the batching we want
-    BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
-    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
-
-    pPrefetchVirtualMemory = (decltype(pPrefetchVirtualMemory))(void *) GetProcAddress(hKernel32, "PrefetchVirtualMemory");
-    if (!pPrefetchVirtualMemory) {
-        return;
-    }
-
-    std::vector<WIN32_MEMORY_RANGE_ENTRY> entries;
-    entries.reserve(ranges.size());
-    for (const auto & range : ranges) {
-        WIN32_MEMORY_RANGE_ENTRY e;
-        e.VirtualAddress = (char *) pimpl->addr + range.first;
-        e.NumberOfBytes  = (SIZE_T) (range.second - range.first);
-        entries.push_back(e);
-    }
-
-    if (!entries.empty()) {
-        // unchecked, same as the POSIX branch
-        pPrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR) entries.size(), entries.data(), 0);
-    }
-    #endif
-#else
-    GGML_UNUSED(base);
-    GGML_UNUSED(stride);
-    GGML_UNUSED(row_size);
-    GGML_UNUSED(rows);
-    GGML_UNUSED(n_rows);
-#endif
-}
-
 #if defined(_POSIX_MEMLOCK_RANGE) || defined(_WIN32)
 const bool llama_mmap::SUPPORTED  = true;
 #else
@@ -924,6 +833,85 @@ const bool llama_mlock::SUPPORTED = true;
 #else
 const bool llama_mlock::SUPPORTED = false;
 #endif
+
+void llama_prefetch(llama_memory_ranges mr) {
+#if defined(__linux__) || (defined(_WIN32) && _WIN32_WINNT >= 0x602)
+    if (mr.empty()) {
+        return;
+    }
+
+#if defined(_WIN32)
+    using prefetch_virtual_memory_t = BOOL (WINAPI *)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+    static const auto pPrefetchVirtualMemory = (prefetch_virtual_memory_t) (void *) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
+    if (!pPrefetchVirtualMemory) {
+        return;
+    }
+
+    static const long page_size = [] {
+        SYSTEM_INFO info;
+        GetSystemInfo(&info);
+        return (long) info.dwPageSize;
+    }();
+#else
+    static const long page_size = sysconf(_SC_PAGESIZE);
+#endif
+    if (page_size <= 0) {
+        return;
+    }
+
+    const size_t page = (size_t) page_size;
+    std::sort(mr.begin(), mr.end(), [](const llama_memory_range & a, const llama_memory_range & b) {
+        return (uintptr_t) a.addr < (uintptr_t) b.addr;
+    });
+
+    uintptr_t begin = 0, end = 0;
+#if defined(_WIN32)
+    // collect the mr and prefetch them in one call, so the reads can be issued concurrently
+    std::vector<WIN32_MEMORY_RANGE_ENTRY> entries;
+    auto prefetch = [&]() {
+        entries.push_back({ (PVOID) begin, (SIZE_T) (end - begin) });
+        return true;
+    };
+#else
+    auto prefetch = [&]() {
+        if (madvise((void *) begin, end - begin, MADV_WILLNEED) != 0) {
+            LLAMA_LOG_WARN("llama_prefetch: madvise(MADV_WILLNEED) failed: %s\n", strerror(errno));
+            return false;
+        }
+        return true;
+    };
+#endif
+    for (const auto & range : mr) {
+        if (!range.addr || range.size == 0) {
+            continue;
+        }
+        const uintptr_t pointer = (uintptr_t) range.addr;
+        const uintptr_t first = pointer / page * page;
+        const uintptr_t last = (pointer + range.size + page - 1) / page * page;
+        if (end && first > end) {
+            if (!prefetch()) {
+                return;
+            }
+            end = 0;
+        }
+        if (!end) {
+            begin = first;
+        }
+        end = std::max(end, last);
+    }
+    if (end) {
+        prefetch();
+    }
+#if defined(_WIN32)
+    if (!entries.empty() && !pPrefetchVirtualMemory(GetCurrentProcess(), (ULONG_PTR) entries.size(), entries.data(), 0)) {
+        LLAMA_LOG_WARN("llama_prefetch: PrefetchVirtualMemory failed: %s\n",
+                llama_format_win_err(GetLastError()).c_str());
+    }
+#endif
+#else
+    GGML_UNUSED(mr);
+#endif
+}
 
 size_t llama_path_max() {
     return PATH_MAX;

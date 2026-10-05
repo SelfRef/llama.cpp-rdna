@@ -6,6 +6,9 @@
 #include <vector>
 #include <cstdio>
 
+// staging buffer size for direct I/O reads, 64MB works well for NVMe drives
+#define LLAMA_DIRECT_IO_BUFFER_SIZE (64 * 1024 * 1024)
+
 struct llama_file;
 struct llama_mmap;
 struct llama_mlock;
@@ -55,15 +58,6 @@ struct llama_mmap {
 
     void unmap_fragment(size_t first, size_t last);
 
-    // true if [ptr, ptr + len) is inside this mapping
-    bool contains(const void * ptr, size_t len) const;
-
-    // start reading the given rows of a tensor in this mapping, in one batch.
-    // lazy ranges are MADV_RANDOM, which turns kernel readahead off, so without this a
-    // sparse gather costs one synchronous fault per row. hints only, never changes results.
-    void prefetch_rows(const void * base, size_t stride, size_t row_size,
-                       const int32_t * rows, size_t n_rows) const;
-
     static const bool SUPPORTED;
 
 private:
@@ -84,5 +78,15 @@ private:
     struct impl;
     std::unique_ptr<impl> pimpl;
 };
+
+struct llama_memory_range {
+    const void * addr;
+    size_t size;
+};
+
+using llama_memory_ranges = std::vector<llama_memory_range>;
+
+// Prefetch the host pages covering these memory ranges.
+void llama_prefetch(llama_memory_ranges mr);
 
 size_t llama_path_max();
