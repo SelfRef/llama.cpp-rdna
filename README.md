@@ -24,7 +24,7 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-09-24, `8212c780`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-05, `e117148a`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
@@ -178,7 +178,7 @@ two conflict in one hunk each and need a rebase onto this tree:
 |---|---|---|
 | #27952 | int8 coopmat1 MMQ for RDNA3 — a prefill win on entries without an MTP draft, a decode loss on entries with one (see phase 3) | **merged upstream 2026-09-24**; the fork keeps only its per-type gate, `GGML_VK_NO_CM1_MMQ` and the A-side `end_k` clamp (see the 09-24 round) |
 | #25666 | no MMVQ on speculative-decode steps — `qwen38-bart`'s draft acceptance | 1 hunk vs master, a device-tuning constant block |
-| #28243 | Qwen3.8-Flash-Next MTP head | the image's local `28243-rebased.patch` no longer applies (2 of 19 files), but the PR head itself now merges cleanly — use the PR ref |
+| #28243 | Qwen3.8-Flash-Next MTP head | **gone 2026-10-05**: closed upstream, superseded by #29761 (Qwen4Exp MTP, merged); the fork now runs upstream's qwen4exp as is |
 
 Once those land here, `llama-server` in the image goes back to byte-for-byte upstream and this fork is
 the one binary for every entry. Not before: that order was chosen so no production entry ever sees a
@@ -250,6 +250,81 @@ free-form draft acceptance unchanged (57 → 58 %). The 4B's speed is flat. On t
 texts differ, so per-preset decode is not comparable run to run: prose +8 %, json −12 % (its draft
 acceptance fell 92 → 66 % on a different answer), refactor +11 %, identical output on refactor.
 Check the text again on any IQ4_XS-heavy quant after the next move.
+
+## Maintenance round 2026-10-05
+
+Base moved to upstream master `e117148a` (2026-10-05), 259 commits. Merge cost: 20 files, 68 hunks —
+two thirds of them qwen4exp, where upstream had meanwhile landed its own version of nearly everything
+the fork carried for that model.
+
+| change | what | verdict |
+|---|---|---|
+| qwen4exp (#28243 MTP head, #28213 gather-based QSA decode, #28699 pooled-key cache, the on-disk n-gram/PLE reader, MTP-draft tensor borrowing) | all superseded upstream: #29761 (Qwen4Exp MTP), CUDA sparse flash attention and GLM5-Next's shared k-pool cache (the #28213 author re-measured master as equal or faster at every depth), `llama_prefetch_rows` (#29599) for lazily read gather tables | **dropped**: qwen4exp is upstream's, byte for byte. The `--ngram-on-disk`/`--model-ple` flags and `gguf_extract_ple.py`/`gguf_split_ple_heads.py` are gone with it |
+| rejection sampling for temperature > 0 drafts (from the DFlash2 base) | upstream merged its own (#27694, `spec_draft_q`) | **replaced by upstream's**. The adaptive draft depth (`--spec-draft-adaptive`, `draft-mtp-adaptive`) and #28333's carrier zeroing are re-ported onto it. A replayed draft after a checkpoint restore is accepted without re-verification at any temperature, as before |
+| #28876, #28956, #28751 (supersedes #28927), #29019 | merged upstream | arrive with master. **#29019 no longer costs anything**: the 57 % MoE decode loss it caused in phase 3 is gone in its merged form (table below) |
+| #29182 | MoE-aware `mul_mat_id` tile selection, rejected here on 09-24 for −12 % MoE prefill | merged and then **reverted upstream** (#29936) |
+| #26286 | Qwen3 sliding-window attention pattern | **merged** — jina-reranker-v3.5 needs it (below) |
+| jina-reranker-v3 / v3.5 | the model cannot be served by `/v1/rerank` anywhere else | **added**, see the next section |
+| FA verify packing (guevae2/paoai-strix-engine `d8d0b9b74`): 2-8 token GQA batches in one flash-attention call per KV head | −17 % verify time at 32k on gfx1151 | **not carried, noise here**: on Qwen3.8-27B, 32k-depth decode +3.2 % in one session and −4.8 % in the next; on Qwen3.6-35B-A3B json −2.6 %, depth +3.6 %. Branch `test/fa-verify-pack-2026-10-05` |
+
+What the base move did, greedy, same session as the reference:
+
+| | prose | json | refactor | prefill @32k | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, 7900 XTX, before | 76.6 | 108.4 | 132.2 | 849.2 | — |
+| same, after | 77.1 | 108.8 | 132.5 | 852.7 | byte-identical |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, 7900 XTX, before | 167.9 | 201.1 | — | 1904.8 | — |
+| same, after | 168.2 | 200.8 | — | 1919.4 | byte-identical |
+| Qwen3.5-4B UD-Q4_K_XL, 7800 XT, before | 106.0 | 105.3 | — | 2115.2 | — |
+| same, after | 106.0 | 106.2 | — | **2078.3** | byte-identical |
+
+Decode is a tie everywhere. The one loss is **−1.75 % prefill at 32k on the 7800 XT** (gfx1101,
+Qwen3.5-4B, reproduced A/B/A), with identical output; neither model on the 7900 XTX shows it. No commit
+in the merged range is an obvious cause — upstream's gated-delta-net retune (#29476) leaves the
+RADV subgroup-64 configuration unchanged — so it is accepted and noted here, to recheck next round.
+The 4B's first greedy reply after a fresh load differs from later ones on both binaries; compare
+warm against warm.
+
+## jina-reranker-v3 / v3.5
+
+[jina-reranker-v3.5](https://huggingface.co/jinaai/jina-reranker-v3.5) is a Qwen3-0.6B with
+sliding-window layers and a "last but not late" scoring head: the hidden state at `<|embed_token|>`
+after a document and at `<|rerank_token|>` after the query go through one two-layer projector
+(Linear, ReLU, Linear) and are compared by cosine. Jina's own route is `llama-embedding` plus a Python
+scorer; here it is an ordinary `/v1/rerank` model.
+
+```bash
+python convert_hf_to_gguf.py jina-reranker-v3.5/ --outtype bf16      # JinaForRanking
+llama-quantize jina-reranker-v3.5-BF16.gguf jina-reranker-v3.5-Q8_0.gguf Q8_0
+llama-server -m jina-reranker-v3.5-Q8_0.gguf --reranking -ngl all -c 16384 -np 4 -b 4096 -ub 4096
+```
+
+- The converter writes the projector as `cls`/`cls.output`, the document marker id as
+  `qwen3.rerank.doc_token_id`, and a rerank template. Jina's published GGUFs have neither the projector
+  nor the key, so they still need Jina's scorer; convert from the safetensors.
+- The model is trained listwise, every document in one prompt. `/v1/rerank` scores one document per
+  sequence, so the template is the one-document case of Jina's prompt, cut after the query marker —
+  the model is causal, so nothing after that token can change either hidden state.
+- A pair must be decoded in one ubatch (the document marker is read from the same ubatch as the
+  last token). For such a model the context forces a unified KV cache and `n_batch = n_ubatch`, and the
+  server refuses to split the prompt: size `-ub` for the longest pair you send.
+- The score is a cosine in [−1, 1], not a probability.
+
+Checked against Jina's PyTorch reference (`AutoModel`, fp32, one document per call): BF16 GGUF on a
+7800 XT within 0.0011 on every pair of an EN/PL/technical sanity set, same order everywhere.
+Retrieval quality, nDCG@10 re-ranking the top 25 of an EmbeddingGemma stage 1 (MTEB NFCorpus and
+SciFact, English and their Polish translations; Q8_0, 7800 XT, documents cut to 2500 characters):
+
+| reranker | NFCorpus-PL | SciFact-PL | NFCorpus | SciFact | mean |
+|---|---:|---:|---:|---:|---:|
+| none (stage 1 only) | 0.3008 | 0.6882 | 0.3889 | **0.7911** | 0.5422 |
+| Jina Reranker v2 base multilingual (278M) | 0.3149 | 0.7226 | 0.3839 | 0.7765 | 0.5495 |
+| Qwen3-Reranker-0.6B | 0.3139 | 0.7188 | 0.3995 | 0.7743 | 0.5516 |
+| **jina-reranker-v3.5**, one document per sequence | **0.3201** | **0.7249** | **0.4023** | 0.7897 | **0.5592** |
+
+Best of the three rerankers on every task even scored pointwise. It is also the slowest: its prompt
+carries Jina's system prompt and the query twice, about 1.35x Qwen3-Reranker's wall time for the same
+31k pairs.
 
 ## Build
 
