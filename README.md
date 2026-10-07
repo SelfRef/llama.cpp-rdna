@@ -24,7 +24,7 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-05, `e117148a`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-07, `36a73916`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
@@ -285,6 +285,31 @@ RADV subgroup-64 configuration unchanged — so it is accepted and noted here, t
 The 4B's first greedy reply after a fresh load differs from later ones on both binaries; compare
 warm against warm.
 
+## Maintenance round 2026-10-07
+
+Base moved to upstream master `36a73916` (2026-10-07), 41 commits, mainly to pick up EmbeddingGemma 2
+(#30054). Two conflicts:
+
+| change | what | verdict |
+|---|---|---|
+| #30049 | AMD iGPU: route reads of uncached host-visible memory through the device copy | **fork's UMA readback guard kept**: it already does this for every UMA device and still reads ≤ 64 KiB directly to skip the fence round trip; upstream's version is the same rule for AMD without that exception |
+| #27332 | new head: the density gate stops at 32 tokens on NVIDIA | **not re-merged**: NVIDIA only, AMD keeps 64; the fork's `device->uma` narrowing is unchanged |
+| #29998 / #29822 (MUL_MAT_ID rows when expert ids repeat), #29882 (subgroup `rms_norm`), #29877 (packed f16 FMA without coopmat), #29274 (NVIDIA `rm_id`) | open upstream | **not carried**: still in review, without AMD numbers, or no change on RDNA3 |
+
+Greedy, 7900 XTX unless noted. The reference is the previous build `5fb3ec3`: the 2026-10-05
+numbers for what was not re-run, and a run in this session for the output hashes:
+
+| | prose | json | refactor | prefill @32k | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, before | 77.4 | 108.7 | 132.2 | 849.2 | — |
+| same, after | 76.9 | 108.9 | 132.9 | 856.2 | byte-identical |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before | 167.0 | 203.4 | — | 1904.8 | — |
+| same, after (A/B/A, repeat 3) | 166.6 / 167.9 | 202.8 / 205.0 | — | 1917.7 | byte-identical |
+| Qwen3.5-4B UD-Q4_K_XL, 7800 XT, before | 105.5 | 105.2 | — | 2115.2 | — |
+| same, after | 106.1 | 105.8 | — | 2127.5 | byte-identical |
+
+Flat everywhere. The −1.75 % 32k prefill on the 7800 XT that was noted last round is gone (2127.5).
+
 ## jina-reranker-v3 / v3.5
 
 [jina-reranker-v3.5](https://huggingface.co/jinaai/jina-reranker-v3.5) is a Qwen3-0.6B with
@@ -325,6 +350,58 @@ SciFact, English and their Polish translations; Q8_0, 7800 XT, documents cut to 
 Best of the three rerankers on every task even scored pointwise. It is also the slowest: its prompt
 carries Jina's system prompt and the query twice, about 1.35x Qwen3-Reranker's wall time for the same
 31k pairs.
+
+## jina-embeddings-v5-omni
+
+[jina-embeddings-v5-omni](https://huggingface.co/jinaai/jina-embeddings-v5-omni-small-retrieval)
+(small: Qwen3-0.6B text, 1024 dims; nano: EuroBERT-210M text, 768 dims) embeds text, images and audio
+into one space. Jina ships GGUFs for it, but its own image and audio path needs their
+[`feat-v5-omni`](https://github.com/jina-ai/llama.cpp/tree/feat-v5-omni) branch, 21 commits on a
+May 2026 master. Ported here against the 2026-10-05 base; most of that branch is upstream by now:
+
+| jina-ai commit(s) | what | here |
+|---|---|---|
+| `8127970` encoder combined decode | text + media in one batch for a model without a KV cache (nano) | **upstream** — #29969's mixed batch does it, with the 1-D positions nano needs |
+| `4a252ec`, `0b9cf28`, `ba0d398` | qwen3vl pos_embed align-corners, Pillow-accurate bicubic resize | **upstream** |
+| `37d0f04`, `67ceac2` | image min/max pixels from the mmproj, no padding after the aspect-preserving resize | **ported, gated**: only an mmproj that carries `clip.vision.image_{min,max}_pixels` gets either, so the stock Qwen-VL mmprojs keep their preprocessing; `--image-min/max-tokens` still win |
+| `fa8376b` (part) | Qwen wrapper tokens missing from the text vocab | **ported**: wrappers that are not single special tokens are dropped instead of BPE-split (nano) |
+| `25b6c8b`, `ff59ead`, `1b91bac` | Qwen2.5-Omni audio: `n_window` chunked attention, per-chunk conv, per-chunk positions, variable length, `<\|audio_start\|>` markers | **rewritten, gated on `clip.audio.n_window`**: the encoder gets only the real mel frames (as torch's `feature_attention_mask` does), so the shorter last chunk needs no extra masks and the token count follows from the input length. Variable length is the default — Jina's model card has since moved to it too. Markers come from the vocab: `<\|audio_bos\|>` if it is a special token, else `<\|audio_start\|>`. Qwen2-Audio and upstream's Qwen2.5-Omni mmprojs (no `n_window`) are untouched |
+| `1cfc842` multi-mmproj | `--mmproj` twice to load vision and audio | **not ported**: `scripts/merge-mmproj.py` writes Jina's two mmprojs into one mixed-modality file (`clip.{vision,audio}.projector_type`), which upstream already loads |
+| `e192d1b`, `f23e08e` | `videopair_data` request field, video pixel limits | **not ported**: video goes through upstream's ffmpeg path (cos 0.94, see below) |
+| `02c8c1e`, `5df11fb`, converter halves | converting the checkpoints yourself | **not ported**: Jina's published GGUFs already carry the metadata |
+
+```bash
+python scripts/merge-mmproj.py omni-small-retrieval-vision-mmproj-F16.gguf \
+    omni-small-retrieval-audio-mmproj-F16.gguf omni-small-retrieval-omni-mmproj-F16.gguf
+llama-server -m jina-embeddings-v5-omni-small-retrieval-Q8_0.gguf \
+    --mmproj omni-small-retrieval-omni-mmproj-F16.gguf --embedding --pooling last -ub 4096
+```
+
+POST `/embeddings` with `"prompt_string": "Query: ..."` / `"Document: ..."` for text, the server's
+`media_marker` (from `/props`) plus `multimodal_data` for an image, and
+`"<|im_start|>user\n" + marker + "<|im_end|>\n"` for audio (the model card's chat-template path).
+
+Checked against Jina's PyTorch reference (`AutoModel.embed`, fp32, the model card's raw path), F16
+text GGUF, one process with the merged mmproj, 7800 XT:
+
+| cos vs torch | text (3 probes, EN/PL) | image (1600x1598 photo) | audio (7.2 s speech, 181 tokens) |
+|---|---:|---:|---:|
+| small | ≥ 0.99993 | 0.99790 | 0.99958 |
+| nano | ≥ 0.99996 | 0.99829 | 0.99976 |
+| small, Q8_0 text | ≥ 0.99978 | 0.99769 | 0.99925 |
+| nano, Q8_0 text | ≥ 0.99979 | 0.99812 | 0.99966 |
+
+Jina reports 0.9989-0.9998 for its own branch. **Send audio at 16 kHz**: the same clip at 44.1 kHz,
+resampled by llama.cpp's miniaudio instead of librosa, gave 0.986 (small) and 0.37 (nano). Video
+(4 frames, 2 fps) through upstream's ffmpeg path embeds at 0.938 vs torch with the `<|vision_start|>`
+wrapper: upstream samples 4 fps, keeps the image pixel limits and writes `[0m0.00s]` timestamps
+where Qwen3-VL's processor writes `<0.2 seconds>` per frame pair (1521 tokens vs 618).
+
+Unchanged elsewhere: Qwen3.5-4B (qwen3vl mmproj) image embeddings are byte-identical to the
+previous build on a square and a 700x333 image. Retrieval quality of the text towers alone (same
+harness and tasks as the reranker table, stage 1 only, `Query: `/`Document: ` prompts): small
+0.3228 / 0.7059 / 0.3971 / 0.7642, mean 0.5475; text-nano 0.3144 / 0.6681 / 0.3873 / 0.7600,
+mean 0.5324; EmbeddingGemma-300M with its prompts 0.5423.
 
 ## Build
 
