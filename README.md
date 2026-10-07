@@ -1,4 +1,4 @@
-# llama.cpp-rdna3
+# llama.cpp-rdna
 
 **A llama.cpp fork for AMD RDNA3 / RDNA3.5 on Vulkan — Radeon RX 7900 XTX (gfx1100),
 RX 7800 XT (gfx1101) and Strix Halo / Ryzen AI Max+ 395 (gfx1151). Nothing else.**
@@ -20,7 +20,7 @@ Upstream is where this should all live, and some of it is on its way there
 with a Vulkan implementation; [#27952](https://github.com/ggml-org/llama.cpp/pull/27952), int8
 coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should shrink, not grow.
 
-## What branch `rdna3` carries
+## What branch `rdna` carries
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
@@ -53,7 +53,7 @@ correctness fix — and were briefly carried on that basis. They were then measu
 
 | | prose | json | refactor | prefill @32k | output |
 |---|---|---|---|---|---|
-| `rdna3` (patches 1-6) | 76.2 | 107.7 | 130.6 | 843.6 | matches base |
+| `rdna` (patches 1-6) | 76.2 | 107.7 | 130.6 | 843.6 | matches base |
 | `carry/vulkan-fa-mmq-fp32` (+ FA MMQ fp32 narrowing) | 76.0 | 107.7 | 130.4 | 841.4 | matches base |
 | + `carry/mtp-full-checkpoints` as well | **58.4** | **80.5** | 120.2 | 806.4 | **differs** |
 
@@ -135,7 +135,7 @@ and **byte-identical greedy output**. `LLAMA_KV_ROW_PAD=256` measured null on th
 | Branch | What it is |
 |---|---|
 | `master` | untouched mirror of `ggml-org/llama.cpp`. Never commit here — it is what keeps "Sync fork" and every cross-fork compare working. |
-| `rdna3` | **default**, and what gets built. The base above plus the eight commits. |
+| `rdna` | **default**, and what gets built. The base above plus the eight commits. |
 | `carry/*` | one branch per carried patch set, so a bad upstream rebase blows up in one place instead of all eight. |
 
 ## Roadmap: moving the base
@@ -428,6 +428,6 @@ follow [upstream's documentation](https://github.com/ggml-org/llama.cpp): this t
 RDNA3 pieces described above and is otherwise current master.
 
 In [SelfRef/llama-swap-rdna](https://github.com/SelfRef/llama-swap-rdna) this tree is the
-`llama-rdna3` stage and installs as `llama-server-rdna3`, `llama-cli-rdna3`, `llama-bench-rdna3`,
-`llama-quantize-rdna3`, `llama-perplexity-rdna3` (build args `WITH_RDNA3`, `RDNA3_REPO`,
-`RDNA3_BRANCH`, `RDNA3_COMMIT` — pin the commit).
+`llama-rdna` stage and installs as `llama-server-rdna`, `llama-cli-rdna`, `llama-bench-rdna`,
+`llama-quantize-rdna`, `llama-perplexity-rdna` (build args `WITH_RDNA`, `RDNA_REPO`,
+`RDNA_BRANCH`, `RDNA_COMMIT` — pin the commit).
