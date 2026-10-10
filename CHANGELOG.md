@@ -5,6 +5,15 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-10
+
+- coopmat1 int8 MMQ shader: a k step past `end_k` now writes a zero A scale
+  to shared memory, as the B side already did. The clamp alone was not enough:
+  it re-reads a block of the same row, and an inf scale in that block still
+  turned the row into NaN. Same change as upstream PR #30283 after review,
+  with its regression test (`test_mul_mat_row_inf`, 4 cases). Prefill about
+  0.6 % slower than the clamp alone on a dense Q4_K model, decode flat.
+
 ## 2026-10-07
 
 - **Renamed** from llama.cpp-rdna3 to llama.cpp-rdna, default branch `rdna3` →

@@ -176,7 +176,7 @@ two conflict in one hunk each and need a rebase onto this tree:
 
 | PR | what it is | state |
 |---|---|---|
-| #27952 | int8 coopmat1 MMQ for RDNA3 — a prefill win on entries without an MTP draft, a decode loss on entries with one (see phase 3) | **merged upstream 2026-09-24**; the fork keeps only its per-type gate, `GGML_VK_NO_CM1_MMQ` and the A-side `end_k` clamp (see the 09-24 round) |
+| #27952 | int8 coopmat1 MMQ for RDNA3 — a prefill win on entries without an MTP draft, a decode loss on entries with one (see phase 3) | **merged upstream 2026-09-24**; the fork keeps only its per-type gate, `GGML_VK_NO_CM1_MMQ` and the A-side `end_k` fix (see the 09-24 round; since 2026-10-10 the same change as open PR #30283) |
 | #25666 | no MMVQ on speculative-decode steps — `qwen38-bart`'s draft acceptance | 1 hunk vs master, a device-tuning constant block |
 | #28243 | Qwen3.8-Flash-Next MTP head | **gone 2026-10-05**: closed upstream, superseded by #29761 (Qwen4Exp MTP, merged); the fork now runs upstream's qwen4exp as is |
 
@@ -221,6 +221,13 @@ the end of a row would otherwise read the next row, or the bytes after the tenso
 scale can be NaN (NaN × a zeroed B is still NaN). The per-type cm1 gate (`ggml_vk_type_has_cm1_mmq`,
 13 types, which matches the generator exactly) and `GGML_VK_NO_CM1_MMQ` are still needed, because
 upstream still selects cm1 warptiles per device rather than per type.
+
+Update 2026-10-10: the clamp keeps the load in bounds, but the re-read block belongs to the same
+row, so an inf scale there still gave NaN for a row whose correct result is inf. A k-step past
+`end_k` now also writes a zero A scale, the shape of the B side. This is upstream PR #30283 in its
+reviewed form, regression test included; the shader is byte-identical to the PR. `test-backend-ops
+-o MUL_MAT,MUL_MAT_ID` passes on gfx1100 and gfx1101; the zero fill costs about 0.6 % dense pp2048
+against the clamp alone (Qwen3.5-9B UD-Q4_K_XL, RX 7900 XTX), decode flat.
 
 | change | what | verdict |
 |---|---|---|
