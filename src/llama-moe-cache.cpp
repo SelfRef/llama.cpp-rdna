@@ -277,6 +277,24 @@ struct llama_moe_cache::impl {
             return res;
         };
 
+        // ask the device the same question the scheduler asks for the bank later
+        auto bank_fits = [&](const group & g, int32_t n_slots) {
+            ggml_backend_dev_t dev = ggml_backend_get_device(devices[g.id].backend);
+            for (const ggml_tensor * t : g.ref) {
+                ggml_tensor probe = *t;
+                probe.op       = GGML_OP_NONE;
+                probe.buffer   = nullptr;
+                probe.view_src = nullptr;
+                std::fill(std::begin(probe.src), std::end(probe.src), nullptr);
+                probe.ne[2] = n_slots + 1;
+                probe.nb[3] = probe.nb[2]*probe.ne[2];
+                if (!ggml_backend_dev_supports_op(dev, &probe)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
         // the budget is split among the devices with host experts like the layers, by the tensor split or by default by free memory
         const float * tensor_split = model.tensor_split();
         const bool split_by_free = tensor_split == nullptr ||
@@ -317,6 +335,16 @@ struct llama_moe_cache::impl {
             const int32_t max_slots = g.layers.size()*n_expert;
             while (g.n_slots < max_slots && alloc_size(g, g.n_slots + 1) <= budget) {
                 g.n_slots++;
+            }
+            // a bank is one tensor, so it must also fit the backend's per-tensor limit
+            // (Vulkan: maxStorageBufferRange, 4 GiB on RADV), or the scheduler aborts on the first graph
+            const int32_t n_slots_budget = g.n_slots;
+            while (g.n_slots > 0 && !bank_fits(g, g.n_slots)) {
+                g.n_slots--;
+            }
+            if (g.n_slots < n_slots_budget) {
+                LLAMA_LOG_WARN("%s: MoE cache capped at %d of %d slots for %zu layers: a larger bank exceeds the device's tensor size limit\n",
+                    __func__, g.n_slots, n_slots_budget, g.layers.size());
             }
             if (g.n_slots < n_expert_used) {
                 LLAMA_LOG_WARN("%s: MoE cache budget is too small for %zu layers, they are not cached\n", __func__, g.layers.size());
