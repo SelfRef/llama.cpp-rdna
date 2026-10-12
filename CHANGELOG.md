@@ -5,6 +5,22 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-12
+
+- **Q2_0 on x86 CPUs with AVX2 but no VNNI** (Zen 2/3, Intel before Alder
+  Lake): an AVX2 `ggml_vec_dot_q2_0_q8_0`. Upstream has SIMD for Q2_0 only on
+  ARM (and an open PR for VNNI), so these CPUs ran the scalar loop. The dot
+  product is ~10x faster (4.7 vs 46 cycles per 32 values, `test-quantize-perf`)
+  and passes `test-quantize-fns` with the same error as the scalar code.
+  End to end, Qwen3.8-Flash-Next Q2_0 with every expert on the CPU decodes at
+  16-17 t/s instead of 6.7 (Ryzen 9 5950X). With the MoE expert cache on the
+  GPU nothing changes: the cache already serves ~95 % of the experts.
+- **MoE cache: no longer capped at 4 GiB per bank on Vulkan.** A cache bank
+  that the device refuses is now split across two groups of layers (each with
+  its own banks and LRU), recursively, instead of losing the slots. On a 24 GB
+  card this lets the cache grow from ~12 to ~13.7 GB (+5-8 % decode on
+  Qwen3.8-Flash-Next), at the price of nearly all of the VRAM.
+
 ## 2026-10-11
 
 - Base moved to upstream master `966baae7` (88 commits). New: the MoE expert
