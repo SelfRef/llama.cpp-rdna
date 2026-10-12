@@ -328,7 +328,17 @@ struct llama_moe_cache::impl {
         // within a device the budget is split by the size of the experts, so each group caches the same fraction of its experts
         std::vector<size_t> n_tensors(devices.size(), 0);
         size_t n_tensors_host = 0;
-        for (group & g : groups) {
+        auto host_bytes_of = [&](const std::vector<int32_t> & ils) {
+            size_t res = 0;
+            for (int32_t il : ils) {
+                for (const ggml_tensor * t : llama_moe_cache_layer_experts(model.layers[il])) {
+                    res += ggml_nbytes(t);
+                }
+            }
+            return res;
+        };
+        for (size_t ig = 0; ig < groups.size(); ++ig) {
+            group & g = groups[ig];
             const device & d = devices[g.id];
             const int32_t n_expert  = g.ref[0]->ne[2];
             const size_t  budget    = (size_t) ((double) size*d.split/split_sum*g.host_bytes/d.host_bytes);
@@ -341,6 +351,20 @@ struct llama_moe_cache::impl {
             const int32_t n_slots_budget = g.n_slots;
             while (g.n_slots > 0 && !bank_fits(g, g.n_slots)) {
                 g.n_slots--;
+            }
+            if (g.n_slots < n_slots_budget && g.layers.size() > 1) {
+                // split the layers in half: each half gets half the budget and banks half the size
+                group h;
+                h.id = g.id;
+                h.layers.assign(g.layers.begin() + g.layers.size()/2, g.layers.end());
+                h.ref        = llama_moe_cache_layer_experts(model.layers[h.layers[0]]);
+                h.host_bytes = host_bytes_of(h.layers);
+                g.layers.resize(g.layers.size()/2);
+                g.host_bytes = host_bytes_of(g.layers);
+                g.n_slots    = 0;
+                groups.push_back(std::move(h));
+                --ig;
+                continue;
             }
             if (g.n_slots < n_slots_budget) {
                 LLAMA_LOG_WARN("%s: MoE cache capped at %d of %d slots for %zu layers: a larger bank exceeds the device's tensor size limit\n",
