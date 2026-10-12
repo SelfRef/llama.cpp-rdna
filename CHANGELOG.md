@@ -5,6 +5,26 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-11
+
+- Base moved to upstream master `966baae7` (88 commits). New: the MoE expert
+  cache, `--moe-cache-mib N` (#29887): experts kept in RAM with `--cpu-moe` /
+  `--n-cpu-moe` get an LRU cache of N MiB on the GPU. On Qwen3.6-35B-A3B with
+  every expert in RAM it takes decode from 23 to 56 t/s on a 7900 XTX.
+- **Fix: a large `--moe-cache-mib` no longer aborts on Vulkan.** Each cache bank
+  is a single tensor, and above 4 GiB (RADV's storage buffer limit) the
+  scheduler stopped with "pre-allocated tensor ... cannot run the operation".
+  The cache is now capped at the largest bank the device accepts, and a warning
+  says so. Upstream has the same crash.
+- **Optional flash-attention verify fold for speculative decoding**
+  (`GGML_VK_FA_QTOK_FOLD=1`, upstream WIP PR #30190): coopmat1 FA handles two
+  verify tokens and their GQA heads (ratio 6, e.g. Qwen3.8-27B) in one row
+  tile. Off by default and byte-identical when off. On, MTP decode on
+  Qwen3.8-27B is flat up to 16k context and 26 % faster at 100k.
+- Upstream PR #30146 (small-N split-K for RDNA3/4) was tried and not taken: it
+  costs Qwen3.8-27B MTP decode 8 %.
+- Speed flat and greedy output byte-identical on the three reference models.
+
 ## 2026-10-10
 
 - coopmat1 int8 MMQ shader: a k step past `end_k` now writes a zero A scale

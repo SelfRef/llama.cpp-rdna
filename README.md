@@ -24,7 +24,7 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-07, `36a73916`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-11, `966baae7`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
@@ -316,6 +316,53 @@ numbers for what was not re-run, and a run in this session for the output hashes
 | same, after | 106.1 | 105.8 | — | 2127.5 | byte-identical |
 
 Flat everywhere. The −1.75 % 32k prefill on the 7800 XT that was noted last round is gone (2127.5).
+
+## Maintenance round 2026-10-11
+
+Base moved to upstream master `966baae7` (2026-10-11), 88 commits. It brings the MoE expert cache
+(#29887, `--moe-cache-mib`, and #30112 for several GPUs), #29998 (MUL_MAT_ID handles repeated
+expert ids in the prepass) and sampler/server changes. Three conflicts, all mechanical:
+
+| change | what | verdict |
+|---|---|---|
+| #29998 | `ggml_vk_use_mul_mat_vec_id` now takes a tensor, and `supports_op` calls it too | the fork's `device->uma` density gate moved into the new shape: a static `(device, tensor)` helper plus the context overload the fork's callers use |
+| #29887 | `moe_cache_size` in `llama_context` | combined with the fork's `rerank_whole_pairs` unified-KV switch |
+| server checkpoints | upstream now asserts the result of `load_tgt`/`load_dft` | kept the asserts and the fork's `ON_DEVICE` flag |
+| #29887 on Vulkan | each cache bank (one tensor per expert weight, shared by all layers) can grow past `maxStorageBufferRange` (4 GiB on RADV), and the scheduler then aborts on the first graph with "pre-allocated tensor ... cannot run the operation (NONE)". On Qwen3.6-35B-A3B this happens above about 11000 MiB. Stock upstream crashes the same way | **fixed here** (`421cde51`): the slot count is lowered until `supports_op` accepts the bank, with a warning. 12000 and 19000 MiB both start and cap at 5956 slots |
+| #30190 | coopmat1 FA: fold two verify tokens and their 6 GQA heads into one row tile (opt-in, `GGML_VK_FA_QTOK_FOLD`) | **carried**, upstream WIP. Off: byte-identical output. On: see the depth table |
+| #30146 | wave-aware split-K for small-N GEMMs on RDNA3/4 | **rejected**: Qwen3.8-27B MTP decode 76.8 -> 70.7 prose and 108.9 -> 100.7 json (about 3-6 % per verify step, the rest from different greedy text), even though short-prompt prefill gains 18 % and Qwen3.6-35B-A3B gains 2-4 % decode. Kept as branch `test/30146-2026-10-11` |
+| #30191, #30280, #30207 | deep-KV FA query slicing, large-tile split-K, chunked GDN on coopmat | **not tried**: #30191 needs ubatch > 512, #30280 conflicts with the fork's Vulkan code, #30207 is a draft that needs an unreleased RADV |
+| #27332 | new head: the density gate becomes additive | **not re-merged**: it only changes the branch the fork limits to `device->uma` |
+
+Greedy, 7900 XTX unless noted. Reference = the 2026-10-07 numbers; the 2026-10-10 cm1 zero-fill
+does not change the output for finite scales:
+
+| | prose | json | refactor | prefill @32k | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, before | 76.9 | 108.9 | 132.9 | 856.2 | — |
+| same, after (fold off) | 77.3 | 108.6 | 132.5 | 856.9 | byte-identical |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before | 167.9 | 205.0 | — | 1917.7 | — |
+| same, after | 171.3 | 207.1 | — | 1936.6 | byte-identical |
+| Qwen3.5-4B UD-Q4_K_XL, 7800 XT, before | 106.1 | 105.8 | — | 2127.5 | — |
+| same, after | 105.7 | 105.0 | — | 2106.7 | byte-identical |
+
+#30190 on Qwen3.8-27B (the shape it targets), `depth` preset, `--repeat 3`, fold off -> on, decode
+t/s (draft acceptance):
+
+| KV depth | off | on |
+|---|---|---|
+| 16k | 85.4 (58 %) | 83.2 (56 %) |
+| 32k | 77.3 (63 %) | 78.1 (57 %) |
+| 64k | 72.7 (74 %) | 80.3 (52 %) |
+| 100k | 46.7 (51 %) | **58.9 (53 %)** |
+
+Per verify step it is flat at 16k and faster from 32k on; at 100k, with the same acceptance, decode
+is 26 % higher. Short prompts and 32k prefill are flat. `test-backend-ops -o FLASH_ATTN_EXT`:
+5328/5328 on both cards, fold on and off.
+
+`--moe-cache-mib` on Qwen3.6-35B-A3B (`--cpu-moe`, 7900 XTX, no draft, 256 tokens): all experts on
+the GPU 133.2 t/s; experts on the CPU 23.1; plus an 11000 MiB cache **56.5** (2.4x), with output
+identical to the all-GPU run.
 
 ## jina-reranker-v3 / v3.5
 
