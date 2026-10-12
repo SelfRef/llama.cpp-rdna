@@ -698,6 +698,58 @@ void ggml_vec_dot_q1_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const voi
 #endif
 }
 
+void ggml_vec_dot_q2_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    const int qk = QK2_0;
+    const int nb = n / qk;
+
+    assert(n % qk == 0);
+    assert(nrc == 1);
+    UNUSED(nrc);
+    UNUSED(bx);
+    UNUSED(by);
+    UNUSED(bs);
+
+    const block_q2_0 * GGML_RESTRICT x = vx;
+    const block_q8_0 * GGML_RESTRICT y = vy;
+
+#if defined(__AVX2__)
+    // qword s of qx holds bits 2s..2s+1 of the 8 packed bytes, so element 4b+s lands at byte 8s+b;
+    // qy is put in the same order: a 4x4 byte transpose per lane, then the two lanes interleaved
+    const __m256i shifts = _mm256_set_epi64x(6, 4, 2, 0);
+    const __m256i m3     = _mm256_set1_epi8(3);
+    const __m256i one    = _mm256_set1_epi8(1);
+    const __m256i ytr    = _mm256_setr_epi8(0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15,
+                                            0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    const __m256i yperm  = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+
+    __m256 acc = _mm256_setzero_ps();
+
+    for (int i = 0; i < nb; ++i) {
+        const float d0 = GGML_CPU_FP16_TO_FP32(x[i].d);
+
+        // group 64: one Q2_0 block maps to two Q8_0 blocks
+        for (int k = 0; k < 2; ++k) {
+            const block_q8_0 * GGML_RESTRICT yb = &y[2*i + k];
+
+            uint64_t q;
+            memcpy(&q, &x[i].qs[8*k], sizeof(q));
+            __m256i qx = _mm256_and_si256(_mm256_srlv_epi64(_mm256_set1_epi64x((long long) q), shifts), m3);
+            qx = _mm256_sub_epi8(qx, one); // {0,1,2,3} -> {-1,0,1,2}
+
+            __m256i qy = _mm256_loadu_si256((const __m256i *) yb->qs);
+            qy = _mm256_permutevar8x32_epi32(_mm256_shuffle_epi8(qy, ytr), yperm);
+
+            const __m256 d = _mm256_set1_ps(d0 * GGML_CPU_FP16_TO_FP32(yb->d));
+            acc = _mm256_fmadd_ps(d, mul_sum_i8_pairs_float(qx, qy), acc);
+        }
+    }
+
+    *s = hsum_float_8(acc);
+#else
+    ggml_vec_dot_q2_0_q8_0_generic(n, s, bs, vx, bx, vy, by, nrc);
+#endif
+}
+
 void ggml_vec_dot_q4_0_q8_0(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
     const int qk = QK8_0;
     const int nb = n / qk;
