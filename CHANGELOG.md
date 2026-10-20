@@ -5,6 +5,23 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-20
+
+- Base moved to upstream master `52ffa027` (224 commits). Relevant here: the
+  Qwen3.5-family delta-net output reshape is upstream now (#30823), matmul
+  dispatches split at the device's workgroup-count limit (#29533), packed f16
+  FMA in the scalar matmul (#29877), an AMD scratch copy of strided f16/bf16 KV
+  for long prefills (#27703), upstream's AVX2 Q2_0 dot product (replaces the
+  fork's), `--spec-draft-n-ubatch`, and the Qwen-VL image resize fix in mtmd.
+- **Fix: ROCmFP4 MMQ shaders build again** on the new base: their A loader
+  takes the in-bounds flag #29533 introduced and zero-fills past the end.
+- Re-merged at their new heads: #27210 (plain `draft-mtp` no longer aborts
+  when `--spec-draft-n-max` is below the adaptive floor; fewer recurrent-state
+  snapshot copies) and unslothai#95 (penalty sampler out-of-bounds read).
+- Speed unchanged on Qwen3.8-27B ROCmFP4-FAST, Qwen3.6-35B-A3B and Qwen3.5-4B;
+  output byte-identical except one Qwen3.5-4B prompt that flips at a near-tie
+  token.
+
 ## 2026-10-12
 
 - **Q2_0 on x86 CPUs with AVX2 but no VNNI** (Zen 2/3, Intel before Alder

@@ -24,7 +24,7 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-11, `966baae7`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-20, `52ffa027`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
@@ -363,6 +363,43 @@ is 26 % higher. Short prompts and 32k prefill are flat. `test-backend-ops -o FLA
 `--moe-cache-mib` on Qwen3.6-35B-A3B (`--cpu-moe`, 7900 XTX, no draft, 256 tokens): all experts on
 the GPU 133.2 t/s; experts on the CPU 23.1; plus an 11000 MiB cache **56.5** (2.4x), with output
 identical to the all-GPU run.
+
+## Maintenance round 2026-10-20
+
+Base moved to upstream master `52ffa027` (2026-10-20), 224 commits. On these cards it brings #30823
+(the Qwen3.5-family delta-net output reshaped to 2D before its projection, the same change as the
+carried #28265, which is retired), #29533 (matmul dispatches split at `maxComputeWorkGroupCount`),
+#29877 (packed f16 FMA in the scalar `mul_mm`), #27703 (AMD: strided f16/bf16 KV copied once to a
+scratch buffer for prefill flash attention, only with f16/f16 or bf16/bf16 caches and 256+ query
+rows), upstream's own AVX2 Q2_0 dot product (replaces the fork's), `--spec-draft-n-ubatch` and the
+Qwen-VL resize fix in mtmd.
+
+| change | what | verdict |
+|---|---|---|
+| #29533 | `block_a_to_shmem` in the MMQ shaders takes an in-bounds flag | the ROCmFP4 / ROCmFP4-FAST loader did not have it, so every ROCmFP4 MMQ shader failed to compile; it now takes the flag and zero-fills blocks past `end_k` like the stock types |
+| #30823 | 2D delta-net output reshape | supersedes #28265; upstream's version kept |
+| upstream AVX2 Q2_0 | `ggml_vec_dot_q2_0_q8_0` | upstream's kernel kept, the fork's dropped |
+| Qwen3 graph | upstream split it into a shared backbone plus a derived Decision-2 head | the fork's sliding-window template (#26286) now wraps the backbone; the Decision-2 graph derives from the non-SWA instance |
+| server checkpoints | upstream #30666 erases checkpoints past the shared prefix | combined with #25592's exact-position rule (a checkpoint is erased if either says so); the replay acceptance now reads the moved batch indices |
+| #27210 | new head: plain `draft-mtp` no longer aborts below the adaptive floor, depth resets per generation, fewer recurrent snapshot copies, retuned climb table | **re-merged** |
+| unslothai#95 | new head: penalties skip history ids outside the candidate list | **re-merged** (out-of-bounds read fix) |
+| #27332 | new head (unchanged since 10-07) | not re-merged, as before |
+| #30738, #30351, #30591, #30665 | Q4_0 KV FA transpose (measured on GCN), cm1 FA tile shape from the device (Intel), tiled-transpose concat (the upstream form of the fork's own kernel), scratch-buffer accounting | **not tried** this round |
+
+Greedy, 7900 XTX unless noted. Reference = the 2026-10-11 numbers:
+
+| | prose | json | refactor | prefill @32k | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, FA fold on, before | 76.8 | 108.3 | 133.5 | 854.9 | — |
+| same, after | 76.2 | 108.2 | 132.8 | 851.4 | byte-identical |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before | 169.2 | 201.7 | — | — | — |
+| same, after | 168.5 | 200.3 | — | — | byte-identical |
+| Qwen3.5-4B UD-Q4_K_XL, 7800 XT, before | 105.7 | 105.0 | — | — | — |
+| same, after | 104.3 | 104.1 | — | — | json, tools and image QA identical; prose differs |
+
+The Qwen3.5-4B prose text changes at a near-tie token (the same alternative text #30146 produced
+in the previous round). The model's graph is numerically unchanged, so the likeliest source is
+#29877's FMA order for f16 accumulation; speed is unchanged.
 
 ## jina-reranker-v3 / v3.5
 
