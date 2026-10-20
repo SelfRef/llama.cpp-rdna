@@ -1577,7 +1577,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         n_cap.assign(n_seq, 0);
         n_last.assign(n_seq, 0);
 
-        SPC_TRC("%s", "adding speculative implementation 'draft-mtp'\n");
+        SPC_TRC("adding speculative implementation '%s'\n", common_speculative_type_to_str(this->type).c_str());
         adaptive_n = this->params.adaptive;
         SPC_TRC("- n_max=%d, n_min=%d, p_min=%.2f, n_embd=%d, backend_sampling=%d\n", this->params.n_max, this->params.n_min, this->params.p_min, n_embd, (int) this->params.backend_sampling);
         SPC_TRC("- gpu_layers=%d, cache_k=%s, cache_v=%s, ctx_tgt=%s, ctx_dft=%s, devices=[%s]\n",
@@ -1698,6 +1698,12 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
         // reset here rather than per round, or two identical requests differ
         common_sampler_reset(smpls[seq_id].get());
+
+        // new generation: the depth learned for the previous content is stale,
+        // so the controller starts from the floor again, even for an empty prompt
+        if (adaptive) {
+            adaptive_ctrl[seq_id].reset(this->params.n_max, this->params.n_min_adaptive);
+        }
 
         const int32_t N = (int32_t) prompt.size();
         if (N <= 0) {
@@ -1867,6 +1873,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             // result_q is only set when the caller wants rejection, so it also gates the retune
             if (dp.result_q) {
                 spec_retune(smpls, smpls_cfg, llama_get_model(ctx_dft), seq_id, dp.temp, dp.seed);
+            }
+
+            // effective draft cap for this step: adaptive depth (or the user n_max),
+            // then clamped by the per-call context bound from the server
+            n_cap[seq_id] = adaptive ? adaptive_ctrl[seq_id].n_cur : params.n_max;
+            if (dp.n_max > 0 && dp.n_max < n_cap[seq_id]) {
+                n_cap[seq_id] = dp.n_max;
             }
 
             // a reset reseeds the chain, which breaks probabilistic drafting
