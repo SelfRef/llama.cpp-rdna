@@ -223,8 +223,6 @@ llama_model_qwen3next::graph::graph(const llama_model & model, const llm_graph_p
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
-
-    ggml_build_forward_expand(gf, cur);
 }
 
 ggml_tensor * llama_model_qwen3next::graph::build_norm_gated(
@@ -301,7 +299,6 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn(
                 Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
     cb(cur, "attn_pregate", il);
 
-    // TODO: CUDA is missing non-contiguous unary ops. when implemented: remove this cont
     gate = ggml_cont_2d(ctx0, gate, n_embd_head * n_head, n_tokens);
 
     gate = ggml_sigmoid(ctx0, gate);
@@ -442,9 +439,6 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
                                    split_sizes_ba[0] * ggml_element_size(mixed_ba_reshaped));
     cb(a, "a", il);
 
-    // TODO: CUDA is missing non-contiguous unary ops. when implemented: remove this cont
-    b = ggml_cont(ctx0, b);
-
     ggml_tensor * beta = ggml_sigmoid(ctx0, b);
 
     // Reshape a to merge head dimensions: [batch, seq_len, num_k_heads, num_v_heads/num_k_heads] -> [batch, seq_len, num_v_heads]
@@ -553,12 +547,7 @@ ggml_tensor * llama_model_qwen3next::graph::build_layer_attn_linear(
     // Apply gated normalization: self.norm(core_attn_out, z)
     ggml_tensor * attn_out_norm = build_norm_gated(output, model.layers[il].ssm_norm, z_2d, il);
 
-    // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * head_dim, n_tokens * n_seqs]
-    // Flattened to 2D before the projection rather than after it: keeping the token
-    // and sequence axes separate makes src1 [D, n_seq_tokens, n_seqs], which the
-    // backends dispatch as n_seqs independent n=n_seq_tokens mat-vecs over the same
-    // weight. During batched decode (n_seq_tokens == 1, n_seqs == batch) that is one
-    // GEMV per sequence instead of a single batch-wide one.
+    // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * head_dim , n_tokens * n_seqs ]
     ggml_tensor * final_output = ggml_reshape_2d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens * n_seqs);
     cb(final_output, "final_output", il);
 
@@ -746,7 +735,6 @@ llama_model_qwen3next::graph_mtp::graph_mtp(const llama_model & model, const llm
             ggml_element_size(Qcur_full) * n_embd_head * 2 * n_head,
             ggml_element_size(Qcur_full) * n_embd_head);
 
-    // TODO: CUDA is missing non-contiguous unary ops. when implemented: remove this cont
     gate = ggml_cont_2d(ctx0, gate, n_embd_head * n_head, n_tokens);
     cb(gate, "mtp_gate", il);
 
@@ -826,5 +814,4 @@ llama_model_qwen3next::graph_mtp::graph_mtp(const llama_model & model, const llm
     cb(cur, "result_output", -1);
 
     res->t_logits = cur;
-    ggml_build_forward_expand(gf, cur);
 }

@@ -239,8 +239,6 @@ llama_model_qwen35::graph::graph(const llama_model & model, const llm_graph_para
 
     cb(cur, "result_output", -1);
     res->t_logits = cur;
-
-    ggml_build_forward_expand(gf, cur);
 }
 
 std::pair<ggml_tensor *, ggml_tensor *> llama_model_qwen35::graph::build_qkvz(
@@ -472,12 +470,7 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
     // Apply gated normalization: self.norm(core_attn_out, z)
     ggml_tensor * attn_out_norm = build_norm_gated(output, model.layers[il].ssm_norm, z_2d, il);
 
-    // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * head_dim, n_tokens * n_seqs]
-    // Flattened to 2D before the projection rather than after it: keeping the
-    // token and sequence axes separate makes src1 [D, n_seq_tokens, n_seqs], which
-    // the backends dispatch as n_seqs independent n=n_seq_tokens mat-vecs over the
-    // same weight. During batched decode (n_seq_tokens == 1, n_seqs == batch) that
-    // is one GEMV per sequence instead of a single batch-wide one.
+    // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * head_dim , n_tokens * n_seqs ]
     ggml_tensor * final_output = ggml_reshape_2d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens * n_seqs);
     cb(final_output, "final_output", il);
 
@@ -541,6 +534,16 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
         ggml_tensor * tok_embd_w = layer.nextn.embed_tokens ? layer.nextn.embed_tokens : model.tok_embd;
 
         tok_embd = ggml_get_rows(ctx0, tok_embd_w, inp->tokens);
+
+        // a Hadamard-latent table stores rotated rows; restore the primal basis
+        if (hdmd) {
+            if (const auto it = hdmd->inv.find(tok_embd_w); it != hdmd->inv.end()) {
+                tok_embd = llama_mul_mat_hadamard(ctx0, tok_embd, it->second.rot);
+                if (it->second.signs) {
+                    tok_embd = ggml_mul(ctx0, tok_embd, it->second.signs);
+                }
+            }
+        }
     } else {
         tok_embd = inp->embd;
     }
@@ -662,5 +665,4 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
     cb(cur, "result_output", -1);
 
     res->t_logits = cur;
-    ggml_build_forward_expand(gf, cur);
 }
