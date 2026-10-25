@@ -26,6 +26,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -917,9 +918,13 @@ std::string fs_path_to_utf8(const std::filesystem::path & path) {
 }
 
 void fs_write_atomic(const std::filesystem::path & path, const std::string & data) {
+    // a random suffix gives every writer its own temporary file, across processes and containers
+    std::random_device rd;
+    const uint64_t id = ((uint64_t) rd() << 32) | rd();
+
     std::error_code ec;
     std::filesystem::path path_tmp = path;
-    path_tmp += ".tmp";
+    path_tmp += "." + std::to_string(id) + ".tmp";
 
     if (path.has_parent_path()) {
         std::filesystem::create_directories(path.parent_path(), ec);
@@ -1234,6 +1239,9 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
     if (ctx_id >= 0 && gguf_get_kv_type(gguf_ctx.get(), ctx_id) == GGUF_TYPE_UINT32) {
         info.n_ctx_train = gguf_get_val_u32(gguf_ctx.get(), ctx_id);
     }
+
+    // same key as llama_model_chat_template(model, nullptr)
+    info.has_chat_tmpl = gguf_find_key(gguf_ctx.get(), "tokenizer.chat_template") >= 0;
 
     return info;
 }
