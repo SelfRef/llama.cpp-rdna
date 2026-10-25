@@ -24,7 +24,7 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-20, `52ffa027`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-25, `fa3645fe`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
@@ -199,14 +199,14 @@ The same session also corrected what `GGML_VK_NO_CM1_MMQ` is for. The 09-18 rule
 entries only"; both arms on one binary say the discriminator is **the MTP draft**, not the weight
 format:
 
-| entry | MTP | quant | cm1 |
+| model | MTP | quant | cm1 |
 |---|---|---|---|
-| gemma4 | no | UD-Q4_K_XL | **on** — +9 % prose / +29 % json prefill, decode flat |
-| ling3 | no | UD-Q4_K_XL | **on** — +19 % / +22 % prefill, decode flat |
-| qwen36 | yes | UD-Q4_K_M | **off** — cm1 costs 17-21 % decode |
-| qwen38-fast | yes | ROCmFP4-FAST | **off** — cm1 costs 30 % prefill, 37 % decode (09-18) |
+| Gemma 4 | no | UD-Q4_K_XL | **on** — +9 % prose / +29 % json prefill, decode flat |
+| Ling 3 | no | UD-Q4_K_XL | **on** — +19 % / +22 % prefill, decode flat |
+| Qwen3.6-35B-A3B | yes | UD-Q4_K_M | **off** — cm1 costs 17-21 % decode |
+| Qwen3.8-27B | yes | ROCmFP4-FAST | **off** — cm1 costs 30 % prefill, 37 % decode (09-18) |
 
-This also supersedes the "+18.5 % MoE" figure in the phase 2 table: qwen36 decode was flat under cm1
+This also supersedes the "+18.5 % MoE" figure in the phase 2 table: Qwen3.6-35B-A3B decode was flat under cm1
 on 09-18 and is -17 % now. The only cm1-touching commit in between is `aa5e52e44` (clamp the A
 prefetch to `end_k`), which added a per-prefetch select inside the unrolled load. That is an untested
 hypothesis and it matters, because the clamp is a correctness fix the Strix Halo peer needs.
@@ -400,6 +400,37 @@ Greedy, 7900 XTX unless noted. Reference = the 2026-10-11 numbers:
 The Qwen3.5-4B prose text changes at a near-tie token (the same alternative text #30146 produced
 in the previous round). The model's graph is numerically unchanged, so the likeliest source is
 #29877's FMA order for f16 accumulation; speed is unchanged.
+
+## Maintenance round 2026-10-25
+
+Base moved to upstream master `fa3645fe` (2026-10-25), 103 commits. On the paths these cards take it
+brings #30106 (one warp tile per subgroup in the small matmul tiles), #30656 (src1 precision in the
+Vulkan matmuls), #26631 (`MUL_MAT_ID` index -1 skips the computation), the server entrypoint refactor
+(#31113), upstream's QSA mask without the KQ mask (#30965, which needed the fork's null-mask guard
+kept in `llm_graph_input_mem_hybrid::set_input`), and mtmd additions. Speed and output unchanged.
+
+| change | what | verdict |
+|---|---|---|
+| #30190 | new head: the verify-token fold is generalized (`gqa_tok = Br / gqa_ratio`, any GQA ratio, a specialization constant instead of spare push-constant bits, folded mask rows read per token) | **re-merged** (old head reverted, new head merged): output byte-identical, speed within noise; the fold itself still pays +3.4 % decode at 32k depth on Qwen3.8-27B (78.2 vs 75.6 t/s), so `GGML_VK_FA_QTOK_FOLD` stays the recommended setting there |
+| #30280 | RDNA3/4 split-K for 128x128 tiles with a partial last wave | **rejected**: +4.2 % prefill at 32k on Qwen3.8-27B ROCmFP4-FAST (884.8 vs 848.9 t/s), but it moves the logits far more than a summation order should: wikitext-2 KL divergence against the same build without it 2.7e-3 (same top token 96.9 %) on ROCmFP4-FAST and 5.0e-4 (99.0 %) on UD-Q4_K_XL; a run of the base against itself gives exactly 0 |
+| #31022 | K-quant dequant hoisted out of the column loop in `mul_mat_vecq` | **not adopted**: neutral on Qwen3.6-35B-A3B UD-Q4_K_M (interleaved runs within 1 %) and on ROCmFP4-FAST, hashes identical. It needed an index-only `a_tile` for the ROCmFPx types to compile (kept on the test branch) |
+| #31045 | MMQ with mixed-signedness integer dot products | **not adopted**: prefill and decode within noise, output identical |
+| #29882 | RMS norm with subgroup reductions | **not adopted**: output moves (reduction order), json decode −1.2 %, prose within noise |
+| #30351 | coopmat1 flash-attention tile shape from the device | **parked**: aimed at Intel; on these cards the device shape is the 16x16 the shader already uses, and the rewrite conflicts with the carried coopmat1 FA patches and #30190's specialization constant |
+| #30665, #30591 | scratch buffers for `dequant_kv`; upstream's tiled-transpose concat | **not tried**: #30665 only touches f16/f16 and bf16/bf16 KV caches; #30591 is the upstream form of this fork's own concat kernel and conflicts with it in four files, a clean-up for a round of its own |
+| #30146 | new head | rebase only (no code change), stays dropped |
+
+Greedy, 7900 XTX, every arm on a freshly loaded server (a server reused across runs keeps its
+on-device context checkpoints: VRAM reads higher and one prompt can flip at a near-tie token, on the
+old binary as well):
+
+| | prose | json | refactor | prefill @32k | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, FA fold on, before | 77.4 | 108.8 | 132.8 | 851.4 | — |
+| same, after | 77.6 | 109.2 | 133.5 | 846.8 | byte-identical |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before (base, two runs) | 166.5 / 168.5 | 204.4 / 205.0 | — | — | — |
+| Qwen3.5-9B UD-Q4_K_XL (on the 7900 XTX), before | 105.2 | 105.2 | — | — | — |
+| same, after | 105.4 | 105.4 | — | — | prose, json and image QA identical |
 
 ## jina-reranker-v3 / v3.5
 

@@ -5,6 +5,20 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-25
+
+- Base moved to upstream master `fa3645fe` (103 commits): small-tile matmul
+  warp layout (#30106), src1 precision in the Vulkan matmuls (#30656),
+  `MUL_MAT_ID` index -1 (#26631), the server entrypoint refactor (#31113).
+- #30190 (coopmat1 flash-attention verify-token fold, `GGML_VK_FA_QTOK_FOLD`)
+  re-merged at its new head: the fold now works for any GQA ratio that fits
+  the tile. Still +3.4 % decode at 32k context on Qwen3.8-27B with MTP.
+- Tried and not taken: #30280 (split-K for large tiles: +4.2 % prefill but a
+  wikitext KL divergence of 2.7e-3 on ROCmFP4), #31022, #31045 and #29882
+  (no gain on these cards).
+- Speed unchanged on Qwen3.8-27B ROCmFP4-FAST, Qwen3.6-35B-A3B and Qwen3.5-9B;
+  greedy output byte-identical.
+
 ## 2026-10-20
 
 - Base moved to upstream master `52ffa027` (224 commits). Relevant here: the
