@@ -24,14 +24,14 @@ coopmat1 MMQ for RDNA3, merged on 2026-09-24). When it does, this fork should sh
 
 Base: `LaurentZuijdwijk/llama.cpp` @ `11bfe8a6` (upstream `0190529e`, 2026-08-30) — the ROCmFPx
 formats, the batch-3..8 mat-vec path, `--spec-draft-adaptive`, and the RADV ≥ 25.3 coopmat LDS pad
-gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-25, `fa3645fe`): the re-port is complete, the fork is no longer behind.
+gate — and, since 2026-09-18, **upstream master itself** (last merged 2026-10-31, `0138937e`): the re-port is complete, the fork is no longer behind.
 On top of upstream there are five carried patches (the swiglu fusion was dropped once upstream's #27220
 superseded it) plus the fork's own ROCmFPx type plumbing, its delta-net concat-transpose kernel, and the
 UMA readback guard:
 
 | # | Patch | Author | Why it is here |
 |---|---|---|---|
-| 1 | `vulkan: hoist the coopmat1 FA P-fragment load out of the hsv_tile loop` | Nathan Wilson | coopmat1 flash-attention is the path RDNA3 actually takes |
+| 1 | `vulkan: hoist the coopmat1 FA P-fragment load out of the hsv_tile loop` | Nathan Wilson | coopmat1 flash-attention is the path RDNA3 actually takes; upstream form open as [#31197](https://github.com/ggml-org/llama.cpp/pull/31197) (with 2), drop both when it lands |
 | 2 | `vulkan: store coopmat1 FA Psh query-major so the GEMM2 A load vectorizes` | Nathan Wilson | same |
 | 3 | `vulkan: pin a 32-wide subgroup for coopmat1 FA where narrowing is free` | Nathan Wilson | same |
 | 5 | `server: keep speculative checkpoints on device` | Gaetan Puleo | MTP speculative decoding is on for every model we run |
@@ -431,6 +431,45 @@ old binary as well):
 | Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before (base, two runs) | 166.5 / 168.5 | 204.4 / 205.0 | — | — | — |
 | Qwen3.5-9B UD-Q4_K_XL (on the 7900 XTX), before | 105.2 | 105.2 | — | — | — |
 | same, after | 105.4 | 105.4 | — | — | prose, json and image QA identical |
+
+## Maintenance round 2026-10-31
+
+Base moved to upstream master `0138937e` (2026-10-31), 144 commits. On the paths these cards take it
+brings RMS norm with subgroup reductions (#29882, measured and not adopted on 10-25, now upstream),
+the batched tensor copy API (#30881), KV rotation constants kept on the GPU (#31073), upstream's form
+of the coopmat1 int8 A-prefetch clamp (#30283, identical to the copy this branch carried), the
+`models` out-param refactor (#31142), a new `F8_E4M3` ggml type (id 43, next to the ROCmFPx ids
+100-107) and `common_fit_apply` (the speculative-aware fit, kept on `has_mtp()` so adaptive MTP is
+fitted too).
+
+The output changes, and all of it is #29882: a build of this merge with #29882 reverted is
+logit-identical to the previous branch (wikitext-2 KL divergence 0, same top token 100 %), with it
+the KL divergence is 2.1e-3 (same top token 97.6 %, PPL ratio 1.0002 ± 0.0008) on Qwen3.8-27B
+ROCmFP4-FAST. A norm reduction order is a summation-order change; on ROCmFP4 it reads like a
+quant-level drift because the activations are quantized after the norm, so a tiny shift flips
+roundings (the same amplification #30280 showed, 5x larger on ROCmFP4 than on a K-quant). Kept as
+upstream has it: perplexity and speed are unchanged, and a revert would be carried forever.
+
+| change | what | verdict |
+|---|---|---|
+| #31415 | MTP graph reallocations when switching between token and embedding inputs | **not adopted**: neutral (77.2 / 108.3 vs 77.2 / 108.6), output identical; the reallocation does not fire on the text path |
+| #31149 | RMS_NORM_MUL_ROPE loop control | **not adopted**: neutral (77.1 / 108.4), output identical |
+| #30146 | new head: split-K for `n <= 32` sized by tile count instead of waves | **not adopted**: the 3-6 % decode loss of the old head is gone, but so is any gain (77.2 / 108.4), output identical |
+| #31323 | coopmat1 FA prompt processing for RDNA3/4: 32-row tiles, a "flipped" FA shader, an RDNA4 occupancy limiter | **rejected before porting**: measured as upstream head vs its own base on Qwen3.8-27B UD-Q4_K_XL, prefill at 32k **-1.9 %** (671.9 vs 685.6 / 684.6), depth decode within noise, output identical. Its gains are Strix Halo and RDNA4 tuning; it also conflicts with carried patches 1-2 and #30190 in three files |
+| #31197 | coopmat1 FA P stored row-major, fragments reused across V tiles | **not needed**: the upstream form of carried patches 1-2 (same layout, same stride); drop those two when it lands |
+| #27973 | `GATED_DELTA_NET` writes its state straight into the recurrent cache | **parked**: draft, 1339 commits behind, conflicts across the Vulkan source split, and as written the fused path binds the op's own output buffer at binding 7, not the cache buffer it computes the offset for |
+
+Greedy, 7900 XTX, every arm on a freshly loaded server, `--repeat 3` (prefill and depth `--repeat 2`
+first, then candidate / reference / candidate at `--repeat 3` for depth):
+
+| | prose | json | prefill @32k | depth-32k decode | output |
+|---|---|---|---|---|---|
+| Qwen3.8-27B ROCmFP4-FAST, MTP n4, FA fold on, before | 77.6 | 109.2 | 846.9 | 77.8 | — |
+| same, after | 77.2 / 77.5 | 108.6 / 108.8 | 853.1 / 854.6 | 78.5 / 78.6 | moves (#29882) |
+| Qwen3.6-35B-A3B UD-Q4_K_M, MTP, before (re-run today) | 168.6 | 204.9 | — | — | — |
+| same, after | 176.2 | 212.8 | — | — | moves (#29882); draft acceptance 55 / 77 % vs 49 / 71 %, so the gain comes from the new greedy text, not from kernel speed |
+| Qwen3.5-9B UD-Q4_K_XL (on the 7900 XTX), before | 105.2 | 105.2 | — | — | — |
+| same, after | 105.1 | 105.0 | — | — | prose and json move (#29882), image QA identical (100 %) |
 
 ## jina-reranker-v3 / v3.5
 

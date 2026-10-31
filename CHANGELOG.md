@@ -5,6 +5,19 @@ work, moved forward in maintenance rounds. Changes are grouped by date, newest
 first. The measurements behind each decision are in the README section of the
 same round.
 
+## 2026-10-31
+
+- Base moved to upstream master `0138937e` (144 commits): RMS norm with
+  subgroup reductions (#29882), the batched tensor copy API (#30881), KV
+  rotation constants on the GPU (#31073), the `F8_E4M3` type, and #30283 (the
+  coopmat1 int8 A-prefetch clamp this branch carried) is upstream now.
+- Greedy output changes through #29882 (norm reduction order; wikitext KL
+  divergence 2.1e-3 on ROCmFP4-FAST, perplexity unchanged).
+- Speed unchanged on Qwen3.8-27B ROCmFP4-FAST and Qwen3.5-9B; Qwen3.6-35B-A3B
+  +4 % decode from better draft acceptance on the new greedy text.
+- Tried and not taken: #31415, #31149, #30146 (new head) neutral; #31323
+  -1.9 % prefill on a 7900 XTX; #27973 parked.
+
 ## 2026-10-25
 
 - Base moved to upstream master `fa3645fe` (103 commits): small-tile matmul
