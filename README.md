@@ -3,6 +3,14 @@
 **A llama.cpp fork for AMD RDNA3 / RDNA3.5 on Vulkan — Radeon RX 7900 XTX (gfx1100),
 RX 7800 XT (gfx1101) and Strix Halo / Ryzen AI Max+ 395 (gfx1151). Nothing else.**
 
+> **Faster on a 7900 XTX or 7800 XT, if one request at a time is enough:**
+> [SelfRef/exllamav3-rdna](https://github.com/SelfRef/exllamav3-rdna), exllamav3 with RDNA3 kernels
+> (EXL3 quants, DFlash2/MTP speculative decoding, served by TabbyAPI). Against this fork's best
+> build on the same card it decodes Qwen3.8-27B 14-67 % faster and prefills 30-36 % faster at equal
+> quality; Qwen3.5-4B / 9B with their MTP head decode 53-94 % faster on an RX 7800 XT. Both ship in
+> [llama-swap-rdna](https://github.com/SelfRef/llama-swap-rdna)'s `:full` image. Stay here for
+> parallel requests, GGUF/ROCmFPx files, Strix Halo, or Vulkan without ROCm.
+
 It exists because the two things this hardware needs have never been in one tree:
 
 1. **The ROCmFPx weight formats** — `Q4_0_ROCMFP4*`, `Q2/Q3/Q6/Q8_0_ROCMFPX` (ggml type ids
